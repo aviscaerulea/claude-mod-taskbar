@@ -1,0 +1,6 @@
+{
+  "name": "claude-mod-taskbar",
+  "description": "A Claude Code mod that shows the main chat's plan as a thin progress bar above the prompt",
+  "owner": { "name": "aviscaerulea" },
+  "plugins": [{ "name": "task-bar", "source": "./" }]
+}

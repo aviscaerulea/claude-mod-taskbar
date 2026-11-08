@@ -1,0 +1,57 @@
+# task-bar
+[![日本語](https://img.shields.io/badge/lang-日本語-red)](README.md)
+[![English](https://img.shields.io/badge/lang-English-blue)](README.en.md)
+[![License](https://img.shields.io/github/license/aviscaerulea/claude-mod-taskbar)](LICENSE)
+
+A Claude Code mod that shows the steps of Claude's work and their progress as a thin bar right above the prompt in the terminal.
+Even with a model that has no TodoWrite, you can see at a glance what is being worked on and how far it has come.
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────── Tasks 2/5 40%
+認証機能の実装：テストを書く
+```
+
+## Features
+
+- Progress bar: When Claude updates its step list, shows the share of finished steps as a bar with the count and percentage.
+- Current step: Shows the job's title and the step in progress under the bar.
+- Plan nudge: When Claude starts working without a step list, asks Claude to make one.
+- Automatic cleanup: When every step is done, hides the bar after 20 seconds or as soon as you send the next prompt.
+
+## Installation
+
+### Requirements
+
+- A version of Claude Code that supports mods (hooks-module plugins); tested on `v2.1.319`
+- Claude Code in the terminal
+
+### Steps
+
+Run the following at the Claude Code prompt.
+
+```
+/plugin install task-bar --marketplace aviscaerulea/claude-mod-taskbar
+```
+
+Answer `y` when asked to add the marketplace.
+Then choose user as the install scope.
+
+To install from a shell, run:
+
+```
+claude plugin install task-bar --marketplace aviscaerulea/claude-mod-taskbar
+```
+
+## Usage
+
+Nothing to do after installing.
+When you ask for a job with two or more steps, Claude makes a step list, the bar appears, and it moves forward each time a step finishes.
+
+## Limitations
+
+- The bar is shown only in the terminal, not in the desktop app or IDE extensions
+- The bar changes only when Claude updates its step list, so a new bar may take a moment to appear after you send a prompt
+- Only the main chat keeps a step list; subagents' work does not appear in the bar
+- Where another plugin composes the system prompt first, the instruction to make a step list does not reach Claude
+  - In that case only the nudges during work ask Claude to make a step list
+- Collapsing with `[-]` at the right end of the bar hides the bar until you open it again

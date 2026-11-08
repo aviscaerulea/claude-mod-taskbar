@@ -1,0 +1,7 @@
+{
+  "name": "task-bar",
+  "version": "1.0.0",
+  "description": "Shows the main chat's plan as a thin progress bar above the prompt",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

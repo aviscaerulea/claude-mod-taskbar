@@ -1,0 +1,39 @@
+# デフォルト全除外
+*
+
+# 管理対象ファイル
+!/.gitignore
+!/README.md
+!/README.en.md
+!/LICENSE
+!/tsconfig.json
+
+# 管理対象ディレクトリ
+!/.claude-plugin/
+!/.claude-plugin/plugin.json
+!/.claude-plugin/marketplace.json
+!/hooks/
+!/hooks/**
+!/types/
+!/types/**
+
+# 管理対象内の除外：秘匿情報
+.env
+.env.*
+!.env.example
+credentials.json
+*.local.*
+*.pem
+*.key
+
+# 管理対象内の除外：生成物・キャッシュ
+__pycache__/
+*.pyc
+node_modules/
+.venv/
+dist/
+build/
+
+# 管理対象内の除外：OS
+.DS_Store
+Thumbs.db
