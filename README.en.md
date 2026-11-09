@@ -8,13 +8,14 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 
 ```
 認証機能の実装：テストを書く
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━············································ Tasks 2/5 40%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━▶···································· Tasks 2/5 40% 0:03:12
 ```
 
 ## Features
 
 - Progress bar: When Claude updates its step list, shows the share of finished steps as a bar with the count and percentage.
 - Smooth motion: Extends the running step's part of the bar little by little over time, and moves on to the next position in about a second when the step is done.
+- Elapsed time: Shows the time since the plan started at the right end of the bar, and stops it when every step is done or the work is interrupted.
 - Current step: Shows the job's title and the step in progress above the bar.
 - Plan nudge: When Claude starts working without a step list, asks Claude to make one.
 - Completion fill-in: When Claude ends its answer without marking the last steps done, treats the remaining steps as done.

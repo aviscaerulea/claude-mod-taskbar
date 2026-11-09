@@ -227,25 +227,26 @@ test('T16 バーは実行中の区間を時間で伸ばし、完了で次の位�
     await ui.unmount()
   }
 
-  // 幅 67 セルのバーで、1 件目の区間（20%）の半分まで 30 秒で伸びる（6.7 セルを切り捨てて 6）
+  // 幅 59 セルのバーで、1 件目の区間（20%）の半分まで 30 秒で伸びる（5.9 セルを切り捨てて 5）
   await clock.advance(30_000)
-  await expectFill(6)
+  await expectFill(5)
   // 同じ状態の送り直しでは位置を変えない
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  await expectFill(6)
+  await expectFill(5)
 
-  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 66 セル）
+  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 58 セル）
   const second = steps.map((st, i) => ({ ...st, status: i === 0 ? 'completed' : i === 1 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: second } as never)
-  await expectFill(6)
+  await expectFill(5)
   await clock.advance(500)
-  await expectFill(9)
+  await expectFill(8)
 
-  // 1 件だけの計画を長く実行しても、区間の終端（全幅 67 セル）までは埋めない
+  // 1 件だけの計画を長く実行しても、区間の終端（全幅 59 セル）までは埋めず、先端の矢印を残す
   await $.tool.call({ tool: PLAN_TOOL, steps: [{ text: 'only', status: 'in_progress' }] } as never)
   await clock.advance(600_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(66) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(58) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '▶' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -264,13 +265,13 @@ test('T17 ターンが中断で終わると、バーをその位置で止め、�
   await clock.advance(30_000)
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
   await clock.advance(60_000)
-  await expectFill(6)
+  await expectFill(5)
 
   // 同じ状態の計画が届くと、止めた位置から伸び直す（巻き戻さない）
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  await expectFill(6)
+  await expectFill(5)
   await clock.advance(60_000)
-  await expectFill(11)
+  await expectFill(10)
 })
 
 test('T18 止めたバーより手前から始まる計画が届くと、バーをその位置へ戻して伸ばす', async ($, on) => {
@@ -282,12 +283,44 @@ test('T18 止めたバーより手前から始まる計画が届くと、バー�
   await clock.advance(30_000)
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
 
-  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 67 セル）
+  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 59 セル）
   const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
   await clock.advance(30_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(6) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(5) })).toBeDefined()
+  await ui.unmount()
+})
+
+test('T19 経過時間は計画の開始から数え、中断と全完了で止まり、100% では矢印を消す', async ($, on) => {
+  const clock = engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  /** 右端の経過時間が text であることを確かめる */
+  const expectTime = async (text: string) => {
+    const ui = await $.ui.mount(BAND)
+    expect(await ui.find({ type: 'Text', text })).toBeDefined()
+    await ui.unmount()
+  }
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await expectTime('0:00:00')
+  await clock.advance(65_000)
+  await expectTime('0:01:05')
+
+  // 中断の間は数えず、次の計画から続きを数える
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
+  await clock.advance(60_000)
+  await expectTime('0:01:05')
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await clock.advance(10_000)
+  await expectTime('0:01:15')
+
+  // 全完了で止まり、矢印も消える
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await clock.advance(5_000)
+  await expectTime('0:01:15')
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: '▶' })).toBeUndefined()
   await ui.unmount()
 })
 

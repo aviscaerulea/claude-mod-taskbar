@@ -94,6 +94,19 @@ function shownRatio(plan: Plan, now: number) {
   return from + (target - from) * p
 }
 
+/**
+ * 時刻 now までの計画の経過時間（ミリ秒）を求める
+ * 止めるまでに数えた spent に、数えている区間（startedAt から now）を足す。止めている間（startedAt が無い）は spent のまま。
+ */
+const elapsedMs = (plan: Plan, now: number) => (plan.spent ?? 0) + (plan.startedAt === undefined ? 0 : Math.max(0, now - plan.startedAt))
+
+/** ミリ秒を「時:分:秒」（例：0:01:05）にする */
+function clockText(ms: number) {
+  const s = Math.floor(ms / 1000)
+  const pad = (v: number) => String(v).padStart(2, '0')
+  return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`
+}
+
 /** mod 内部の失敗をトーストで知らせる（トースト自体の失敗は無視する） */
 function warn($: EngineInterface, err: unknown) {
   try {
@@ -131,6 +144,7 @@ async function hidePlan($: EngineInterface) {
  * 全完了なら DONE_HOLD_MS 後に表示を消す。題名がなければ、作業途中の前の計画からだけ題名を引き継ぐ。
  * 完了数か実行中の手順が変わったときは、いまバーが描いている割合を起点にして新しい位置へ動かす。
  * 同じ状態の送り直しでは起点を保ち、バーを巻き戻さない。止めていたバーは、止めた位置から動かし直す。前の計画が隠れていれば 0 から動かす。
+ * 経過時間は、表示中の計画からはそこまでの値を引き継ぎ、隠れた後の計画では 0 から数える。全完了の計画では数えるのを止める。
  */
 async function applyPlan($: EngineInterface, title: string | undefined, steps: PlanStep[]) {
   const now = await $.clock.now()
@@ -141,6 +155,8 @@ async function applyPlan($: EngineInterface, title: string | undefined, steps: P
       shown: steps.length > 0,
       from: 0,
       at: now,
+      spent: old?.shown ? elapsedMs(old, now) : 0,
+      startedAt: isAllDone(steps) ? undefined : now,
     }
     if (old?.shown && !old.paused && progressKey(old.steps) === progressKey(steps)) return { ...next, from: old.from, at: old.at }
     if (old?.shown) return { ...next, from: shownRatio(old, now) }
@@ -286,7 +302,7 @@ export const register: Register = on => {
   // メインのターンが回答で終わったとき、未完了の計画は全完了として扱う（サブエージェントのターンは除く）
   // モデルが最終回答の前に最後の手順を completed にし忘れると、バーが途中のまま残るため（利用者の判断）。
   // 質問のために途中で止まった場合も 100% になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる。
-  // 中断、拒否、エラーで終わったときは、作業が止まったのでバーをその位置で止め、描き直しも止める（利用者の判断）
+  // 中断、拒否、エラーで終わったときは、作業が止まったのでバーと経過時間をその位置で止め、描き直しも止める（利用者の判断）
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId !== undefined) return r
@@ -299,7 +315,7 @@ export const register: Register = on => {
       else {
         const now = await $.clock.now()
         syncTicker($, false)
-        await update($, planAtom, p => (p ? { ...p, from: shownRatio(p, now), at: now, paused: true } : p))
+        await update($, planAtom, p => (p ? { ...p, from: shownRatio(p, now), at: now, paused: true, spent: elapsedMs(p, now), startedAt: undefined } : p))
       }
     }
     catch (err) {
@@ -358,7 +374,7 @@ export const register: Register = on => {
     const w = e.props.bodyColumns > 0 ? Math.floor(e.props.bodyColumns) : BAR_FALLBACK
 
     // 1 行目：「題名：いまの手順」（実行中がなければ次の手順か All steps done。全角の幅も画面側の truncate-end が数えて切る）
-    // 2 行目：完了の区間、残り、件数、百分率（実行中の手順は 1 行目で示し、バーでは区別しない）
+    // 2 行目：完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
     // 題名の行を上、バーを下に置く（利用者の指定）
     // 件数と百分率は完了した手順だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
     const n = plan.steps.length
@@ -368,10 +384,15 @@ export const register: Register = on => {
     const current = plan.steps.find(st => st.status === 'in_progress')
     const nextUp = plan.steps.find(st => st.status === 'pending')
     const line = current ? current.text : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
-    // バーは件数と百分率と、その間の空白 2 つを除いた残りの幅いっぱいに描く
-    const barW = Math.max(6, w - label.length - pct.length - 2)
+    // 右端には計画の開始からの経過時間を出す（全完了と中断で止まる。利用者の指定）
+    const now = await $.clock.now()
+    const time = clockText(elapsedMs(plan, now))
+    // バーは件数、百分率、経過時間と、その間の空白 3 つを除いた残りの幅いっぱいに描く
+    const barW = Math.max(6, w - label.length - pct.length - time.length - 3)
     // 切り捨てで数え、実行中の区間が四捨五入で終端まで埋まって完了に見えるのを防ぐ（小数の誤差で 1 セル欠けないよう微小な値を足す）
-    const fillC = Math.min(barW, Math.max(0, Math.floor(barW * shownRatio(plan, await $.clock.now()) + 1e-9)))
+    const fillC = Math.min(barW, Math.max(0, Math.floor(barW * shownRatio(plan, now) + 1e-9)))
+    // 100% に届くまでは、完了区間の先に、棒より大きい矢印の先端を 1 セル描く（利用者の指定）
+    const tip = fillC < barW ? '▶' : ''
 
     return (
       <Box flexDirection="column">
@@ -386,12 +407,14 @@ export const register: Register = on => {
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>
             <Text>
               <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
-              <Text color={REST_COLOR}>{'·'.repeat(Math.max(0, barW - fillC))}</Text>
+              {tip ? <Text color={BAR_COLOR}>{tip}</Text> : null}
+              <Text color={REST_COLOR}>{'·'.repeat(Math.max(0, barW - fillC - tip.length))}</Text>
             </Text>
             <Text bold color={BAR_COLOR}>
               {label}
             </Text>
             <Text dimColor>{pct}</Text>
+            <Text dimColor>{time}</Text>
           </Box>
         </Box>
       </Box>
