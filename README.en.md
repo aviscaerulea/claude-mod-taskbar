@@ -7,7 +7,7 @@ A Claude Code mod that shows the steps of Claude's work and their progress as a 
 Even with a model that has no TodoWrite, you can see at a glance what is being worked on and how far it has come.
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────── Tasks 2/5 40%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━············································ Tasks 2/5 40%
 認証機能の実装：テストを書く
 ```
 

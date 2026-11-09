@@ -22,7 +22,9 @@ const STATUSES: readonly PlanStatus[] = ['pending', 'in_progress', 'completed']
 
 // バーの完了区間と、件数の文字
 const BAR_COLOR = '#6b8fc6'
-// バーの残りの区間（淡色表示より黒に寄せた暗い灰色。利用者の指定）
+// バーの残りの区間の色（暗い灰色。利用者の指定）
+// 文字と背景のコントラストを自動で上げるターミナルでは、暗い色を指定しても明るい灰色に引き上げられる（herdr 上で確認）。
+// そのため色を暗くする代わりに、残りの区間は粗い点「·」で描いて目立たせない（利用者の判断）
 const REST_COLOR = '#3a3a3a'
 
 // システムプロンプトに足す節（モデルだけが読む）
@@ -302,7 +304,7 @@ export const register: Register = on => {
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>
             <Text>
               <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
-              <Text color={REST_COLOR}>{'─'.repeat(Math.max(0, barW - fillC))}</Text>
+              <Text color={REST_COLOR}>{'·'.repeat(Math.max(0, barW - fillC))}</Text>
             </Text>
             <Text bold color={BAR_COLOR}>
               {label}
