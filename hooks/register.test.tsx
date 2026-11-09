@@ -194,6 +194,27 @@ test('T14 プロンプト送信で、全完了の計画は消え、作業途中�
   await expectNothingDrawn($)
 })
 
+test('T15 メインのターンが回答で終わると、未完了の計画を全完了にする', async ($, on) => {
+  engine(on)
+  on('turn.complete', () => ({ text: 'answer' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+
+  // サブエージェントの終了と、中断で終わったターンでは変えない
+  const end = { answer: 'done', durationMs: 1, turnId: 't1', isAborted: false }
+  await $.turn.complete({ ...end, reason: 'answer', agentId: 'id-A' } as never)
+  await $.turn.complete({ ...end, reason: 'aborted', isAborted: true } as never)
+  let ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: 'Tasks 2/5' })).toBeDefined()
+  await ui.unmount()
+
+  await $.turn.complete({ ...end, reason: 'answer' } as never)
+  ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: 'Tasks 5/5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'All steps done' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })

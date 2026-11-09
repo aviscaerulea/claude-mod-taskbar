@@ -142,7 +142,7 @@ async function withNudge<R>($: EngineInterface, r: R): Promise<R> {
 
 /**
  * mod のフックを登録する
- * plan ツールの登録、システムプロンプトへの指示、催促文、プロンプト上の計画バーの描画を担う。
+ * plan ツールの登録、システムプロンプトへの指示、催促文、回答終了時の完了の補完、プロンプト上の計画バーの描画を担う。
  */
 export const register: Register = on => {
   // plan ツールを登録し、reload 前の全完了の計画を隠す
@@ -214,6 +214,24 @@ export const register: Register = on => {
       }
     }
     return next(e)
+  })
+
+  // メインのターンが回答で終わったとき、未完了の計画は全完了として扱う（中断、拒否、エラーで終わったターンとサブエージェントは除く）
+  // モデルが最終回答の前に最後の手順を completed にし忘れると、バーが途中のまま残るため（利用者の判断）。
+  // 質問のために途中で止まった場合も 100% になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId !== undefined || e.reason !== 'answer') return r
+    try {
+      const plan = await read($, planAtom)
+      if (plan?.shown && !isAllDone(plan.steps)) {
+        await applyPlan($, plan.title, plan.steps.map(st => ({ ...st, status: 'completed' as const })))
+      }
+    }
+    catch (err) {
+      warn($, err)
+    }
+    return r
   })
 
   // /clear と resume では会話が替わるため、前の会話の計画と催促の計数を捨てる
