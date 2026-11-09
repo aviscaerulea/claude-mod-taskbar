@@ -18,6 +18,7 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 - Elapsed time: Shows the time since the plan started at the right end of the bar, and stops it when every step is done or the work is interrupted.
 - Current step: Shows the job's title and the step in progress above the bar.
 - Plan nudge: When Claude starts working without a step list, asks Claude to make one.
+- Update nudge: When Claude uses tools 5 times with no new step finished, asks it once to update the step list.
 - Completion fill-in: When Claude ends its answer without marking the last steps done, treats the remaining steps as done.
 - Automatic cleanup: When every step is done, hides the bar after 20 seconds or as soon as you send the next prompt.
 

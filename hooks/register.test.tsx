@@ -17,7 +17,8 @@ const BAND = {
 function engine(on: On) {
   on('tool.register', (_, e) => ({ value: { tool: `mcp__task-bar__${e.name}` } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: {} }))
+  // command が fail の呼び出しだけエラーで終える
+  on('tool.call', (_, e) => ((e as { command?: string }).command === 'fail' ? { result: 'boom', isError: true } : { result: {} }) as never)
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('prompt.compose', () => ({ sections: [] }))
   on('ui.render', ($, e) => {
@@ -120,19 +121,52 @@ test('T6 計画がなければ、ターンの最初の呼び出しに 1 回だ�
   expect(sub.context ?? []).toEqual([])
 })
 
-test('T7 未完了の計画が 8 回更新されないと、1 回だけ更新を促す', async ($, on) => {
+/** Bash を n 回呼び、各結果の催促文を返す */
+async function bashNotes($: Engine, n: number, command = 'ls') {
+  const notes: string[] = []
+  for (let i = 0; i < n; i++) {
+    const r = await $.tool.call({ tool: 'Bash', command })
+    notes.push((r.context ?? []).join('\n'))
+  }
+  return notes
+}
+
+test('T7 完了数が変わらないまま正常なツールを 5 回呼ぶと、1 回だけ更新を促す', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.prompt.submit(submitOf('go'))
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
-  const notes: string[] = []
-  for (let i = 0; i < 9; i++) {
-    const r = await $.tool.call({ tool: 'Bash', command: 'ls' })
-    notes.push((r.context ?? []).join('\n'))
-  }
-  expect(notes.slice(0, 7).every(n => n === '')).toBe(true)
-  expect(notes[7]).toMatch(/has not changed in a while/)
-  expect(notes[8]).toBe('')
+  const notes = await bashNotes($, 6)
+  expect(notes.slice(0, 4).every(n => n === '')).toBe(true)
+  expect(notes[4]).toMatch(/no step has been marked completed/)
+  expect(notes[5]).toBe('')
+})
+
+test('T7b 同じ完了数の送り直しでは計数を戻さず、完了数が増えたら戻す', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit(submitOf('go'))
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await bashNotes($, 3)
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  const same = await bashNotes($, 2)
+  expect(same[1]).toMatch(/no step has been marked completed/)
+  const advanced = steps.map((st, i) => (i === 2 ? { ...st, status: 'completed' } : i === 3 ? { ...st, status: 'in_progress' } : st))
+  await $.tool.call({ tool: PLAN_TOOL, steps: advanced } as never)
+  const after = await bashNotes($, 5)
+  expect(after.slice(0, 4).every(n => n === '')).toBe(true)
+  expect(after[4]).toMatch(/no step has been marked completed/)
+})
+
+test('T7c エラーで終わったツールは停滞の計数に入れない', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit(submitOf('go'))
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  const failed = await bashNotes($, 6, 'fail')
+  expect(failed.every(n => n === '')).toBe(true)
+  const ok = await bashNotes($, 5)
+  expect(ok[4]).toMatch(/no step has been marked completed/)
 })
 
 test('T8 保存できなかった plan 呼び出しでは、作成の催促を止めない', async ($, on) => {

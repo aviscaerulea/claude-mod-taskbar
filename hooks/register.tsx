@@ -13,8 +13,9 @@ const planAtom = atom({ plugin: 'task-bar', key: 'plan' } as const, null)
 const DONE_HOLD_MS = 20_000
 // 計画なしで何回ツールを呼んだら作成を促すか
 const NUDGE_AFTER = 1
-// 計画の更新から何回ツールを呼んだら更新を促すか
-const STALE_AFTER = 8
+// 完了数が変わらないまま、正常に終わったツールを何回呼んだら更新を促すか（利用者の指定）
+// 手順の完了の報告漏れに気付くきっかけを作るのが目的で、厳密な検出は狙わない（利用者の判断）
+const STALE_AFTER = 5
 // 実行中の手順の区間を、何ミリ秒ごとに残りの半分ずつ伸ばすか（減速しながら区間の終端へ近づき、終端には届かない）
 const CREEP_HALF_MS = 30_000
 // 完了数か実行中の手順が変わったとき、前の位置から新しい位置まで何ミリ秒で動かすか
@@ -43,13 +44,16 @@ const PLAN_PROMPT =
 // ツール結果に付ける催促文（モデルだけが読む）
 const NUDGE_NEW = `Task bar: you have no plan for this task yet. Call ${PLAN_TOOL} now with every step in order, so the user sees your progress.`
 const NUDGE_CONT = `Task bar: the plan has not changed this turn. If this is a new task, call ${PLAN_TOOL} with its steps. If it carries on the last one, send the updated list.`
-const NUDGE_STALE = `Task bar: the plan has not changed in a while. If a step finished, call ${PLAN_TOOL} with the full list now.`
+const NUDGE_STALE = `Task bar: no step has been marked completed in a while. If a step finished, call ${PLAN_TOOL} with the full list now.`
 
 // 催促の計数（ターン単位で数えるため $.state に置かない）
 let turnCalls = 0
 let turnPlanned = false
 let nudged = false
-let sincePlan = 0
+// 完了数が最後に変わってから、正常に終わったツールの呼び出し回数
+let sinceDone = 0
+// 最後に保存した計画の完了数（-1 は未保存。計画の送り直しで完了数が変わったかを見るため）
+let lastDone = -1
 let staleNudged = false
 
 // 全完了した計画を隠すタイマー（reload で止まるため、モジュール変数で足りる）
@@ -177,7 +181,7 @@ async function applyPlan($: EngineInterface, title: string | undefined, steps: P
  * plan ツールの入力を検証して計画に反映する
  * text はモデルへ返す 1 行の結果。不正な入力では計画を変えず、saved を false にする。
  */
-async function planFromTool($: EngineInterface, args: Record<string, unknown>): Promise<{ saved: boolean; text: string }> {
+async function planFromTool($: EngineInterface, args: Record<string, unknown>): Promise<{ saved: boolean; text: string; done?: number }> {
   const reject = (text: string) => ({ saved: false, text: `Plan not saved: ${text}` })
   const raw = args.steps
   if (!Array.isArray(raw)) return reject('send steps as a list of { text, status }.')
@@ -190,7 +194,7 @@ async function planFromTool($: EngineInterface, args: Record<string, unknown>): 
     steps.push({ text, status: o.status })
   }
   await applyPlan($, typeof args.title === 'string' ? oneLine(args.title) : undefined, steps)
-  return { saved: true, text: `Plan saved: ${doneCount(steps)} of ${steps.length} steps done.` }
+  return { saved: true, text: `Plan saved: ${doneCount(steps)} of ${steps.length} steps done.`, done: doneCount(steps) }
 }
 
 /** 催促の計数を新しい作業の開始時点に戻す */
@@ -198,17 +202,20 @@ function resetNudge() {
   turnCalls = 0
   turnPlanned = false
   nudged = false
-  sincePlan = 0
+  sinceDone = 0
+  lastDone = -1
   staleNudged = false
 }
 
 /**
  * メインセッションのツール結果に催促文を足す
- * そのターンで計画がないままツールを呼んだときに 1 回、計画が長く更新されないときに 1 回足す。
+ * そのターンで計画がないままツールを呼んだときに 1 回、完了数が長く変わらないときに 1 回足す。
+ * 完了数の停滞は、拒否もエラーもなく終わった呼び出しだけで数える（失敗した呼び出しは手順を進めていないため）。
  */
 async function withNudge<R>($: EngineInterface, r: R): Promise<R> {
   turnCalls++
-  sincePlan++
+  const failed = !r || typeof r !== 'object' || 'deny' in (r as object) || (r as { isError?: boolean }).isError === true
+  if (!failed) sinceDone++
   const plan = await read($, planAtom).catch(() => null)
   const live = !!plan && plan.steps.length > 0 && !isAllDone(plan.steps)
   let note: string | null = null
@@ -216,7 +223,7 @@ async function withNudge<R>($: EngineInterface, r: R): Promise<R> {
     nudged = true
     note = live ? NUDGE_CONT : NUDGE_NEW
   }
-  else if (live && !staleNudged && sincePlan >= STALE_AFTER) {
+  else if (live && !staleNudged && sinceDone >= STALE_AFTER) {
     staleNudged = true
     note = NUDGE_STALE
   }
@@ -342,7 +349,7 @@ export const register: Register = on => {
     const id = e.agentId
     if (tool === PLAN_TOOL) {
       if (id) return { result: 'Only the main chat keeps a plan. Carry on with your task.' } as never
-      let said = { saved: false, text: 'Plan not saved: something went wrong. Carry on.' }
+      let said: Awaited<ReturnType<typeof planFromTool>> = { saved: false, text: 'Plan not saved: something went wrong. Carry on.' }
       try {
         said = await planFromTool($, e as unknown as Record<string, unknown>)
       }
@@ -350,10 +357,14 @@ export const register: Register = on => {
         warn($, err)
       }
       // 保存できなかった呼び出しでは、催促を止めない
+      // 完了数が変わったときだけ停滞の計数を戻す。同じ完了数の送り直しでは戻さない（別の計画への置き換えで減ったときも戻す）
       if (said.saved) {
         turnPlanned = true
-        sincePlan = 0
-        staleNudged = false
+        if (said.done !== lastDone) {
+          lastDone = said.done ?? -1
+          sinceDone = 0
+          staleNudged = false
+        }
       }
       return { result: said.text } as never
     }
