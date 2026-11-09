@@ -2,8 +2,13 @@ export type PlanStatus = 'pending' | 'in_progress' | 'completed'
 
 export type PlanStep = { text: string; status: PlanStatus }
 
-/** メインセッションの計画（shown は、全完了後 20 秒経つか手順が空になると false） */
-export type Plan = { title: string; steps: PlanStep[]; shown: boolean }
+/**
+ * メインセッションの計画（shown は、全完了後 20 秒経つか手順が空になると false）
+ * from と at はバーの動きの起点で、完了数か実行中の手順が変わった時刻 at に、バーが描いていた割合 from（0〜1）を持つ。
+ * reload 前の版が書いた値には無いので、読む側は無いものとして扱う。
+ * paused は、ターンが中断やエラーで終わってバーを from の位置で止めたことを示す（次に計画が届けば外れる）。
+ */
+export type Plan = { title: string; steps: PlanStep[]; shown: boolean; from?: number; at?: number; paused?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {

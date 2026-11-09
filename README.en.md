@@ -7,14 +7,15 @@ A Claude Code mod that shows the steps of Claude's work and their progress as a 
 Even with a model that has no TodoWrite, you can see at a glance what is being worked on and how far it has come.
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━············································ Tasks 2/5 40%
 認証機能の実装：テストを書く
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━············································ Tasks 2/5 40%
 ```
 
 ## Features
 
 - Progress bar: When Claude updates its step list, shows the share of finished steps as a bar with the count and percentage.
-- Current step: Shows the job's title and the step in progress under the bar.
+- Smooth motion: Extends the running step's part of the bar little by little over time, and moves on to the next position in about a second when the step is done.
+- Current step: Shows the job's title and the step in progress above the bar.
 - Plan nudge: When Claude starts working without a step list, asks Claude to make one.
 - Completion fill-in: When Claude ends its answer without marking the last steps done, treats the remaining steps as done.
 - Automatic cleanup: When every step is done, hides the bar after 20 seconds or as soon as you send the next prompt.

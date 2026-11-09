@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { PlanStatus, PlanStep } from '../types'
+import type { Plan, PlanStatus, PlanStep } from '../types'
 
 // モデルが呼ぶ計画ツールの完全名（$.tool.register の name は「plan」）
 const PLAN_TOOL = 'mcp__task-bar__plan'
@@ -15,6 +15,12 @@ const DONE_HOLD_MS = 20_000
 const NUDGE_AFTER = 1
 // 計画の更新から何回ツールを呼んだら更新を促すか
 const STALE_AFTER = 8
+// 実行中の手順の区間を、何ミリ秒ごとに残りの半分ずつ伸ばすか（減速しながら区間の終端へ近づき、終端には届かない）
+const CREEP_HALF_MS = 30_000
+// 完了数か実行中の手順が変わったとき、前の位置から新しい位置まで何ミリ秒で動かすか
+const CATCH_MS = 1_000
+// バーを描き直す間隔（ミリ秒）。エンジンは描き直しを 1 秒 10 回までにまとめるので、それより粗くする
+const TICK_MS = 250
 // bodyColumns が取れないときの幅（セル数）
 const BAR_FALLBACK = 30
 // plan ツールが受け付ける手順の状態
@@ -48,6 +54,8 @@ let staleNudged = false
 
 // 全完了した計画を隠すタイマー（reload で止まるため、モジュール変数で足りる）
 let holdTimer: { cancel: () => void } | null = null
+// 計画を表示している間だけバーを描き直し続けるタイマー（reload で止まるため、session.start で張り直す）
+let ticker: { cancel: () => void } | null = null
 
 /** n 文字を超える文字列を、末尾を「…」にして n 文字に切る */
 const cut = (t: string, n: number) => (n <= 0 ? '' : t.length > n ? `${t.slice(0, Math.max(0, n - 1))}…` : t)
@@ -60,6 +68,32 @@ const doneCount = (steps: PlanStep[]) => steps.filter(st => st.status === 'compl
 /** 手順が 1 つ以上あり、すべて completed か */
 const isAllDone = (steps: PlanStep[]) => steps.length > 0 && steps.every(st => st.status === 'completed')
 
+/** 完了数と実行中の手順の位置をまとめた値（これが変わったときだけバーの動きの起点を置き直す） */
+const progressKey = (steps: PlanStep[]) => `${doneCount(steps)}/${steps.length}/${steps.findIndex(st => st.status === 'in_progress')}`
+
+/**
+ * 時刻 now にバーが描く割合（0〜1）を求める
+ * 実行中の手順があれば、その区間を起点から CREEP_HALF_MS ごとに残りの半分ずつ伸ばし、完了の報告が届くまで区間の終端には届かせない。
+ * 伸ばす起点は、完了数の位置と起点の割合 from の大きい方とし、止めた位置から再開してもバーを巻き戻さない。
+ * from が区間の終端を超えるとき（完了数の少ない計画に置き換わったとき）は、完了数の位置から伸ばし、バーはそこへ戻る。
+ * 起点 at から CATCH_MS の間は、from からその位置へ動かす。paused の計画は from の位置で止めたまま描く。
+ * from と at が無い計画（reload 前の版の値）は、完了数の位置で止まったものとして描く。
+ */
+function shownRatio(plan: Plan, now: number) {
+  const n = plan.steps.length
+  if (!n) return 0
+  const base = doneCount(plan.steps) / n
+  const from = plan.from ?? base
+  if (plan.paused) return from
+  const dt = Math.max(0, now - (plan.at ?? now))
+  const running = plan.steps.some(st => st.status === 'in_progress')
+  const end = running ? base + 1 / n : base
+  const lo = from < end ? Math.max(base, from) : base
+  const target = running ? lo + (end - lo) * (1 - 0.5 ** (dt / CREEP_HALF_MS)) : base
+  const p = Math.min(1, dt / CATCH_MS)
+  return from + (target - from) * p
+}
+
 /** mod 内部の失敗をトーストで知らせる（トースト自体の失敗は無視する） */
 function warn($: EngineInterface, err: unknown) {
   try {
@@ -71,21 +105,54 @@ function warn($: EngineInterface, err: unknown) {
 }
 
 /**
- * 計画を丸ごと置き換える
- * 全完了なら DONE_HOLD_MS 後に表示を消す。題名がなければ、作業途中の前の計画からだけ題名を引き継ぐ。
+ * バーを描き直すタイマーを、計画を表示しているかに合わせて張るか止める
+ * 表示中はバーが時間で伸びるため、描き直しを TICK_MS ごとに求め続ける。
  */
-async function applyPlan($: EngineInterface, title: string | undefined, steps: PlanStep[]) {
-  await update($, planAtom, old => ({
-    title: title || (old && !isAllDone(old.steps) ? old.title : '') || 'Plan',
-    steps,
-    shown: steps.length > 0,
-  }))
+function syncTicker($: EngineInterface, shown: boolean) {
+  if (shown) {
+    ticker ??= $.clock.every(TICK_MS, () => $.ui.invalidate('ui.render'))
+  }
+  else {
+    ticker?.cancel()
+    ticker = null
+  }
+}
+
+/** 計画を隠し、保留タイマーと描き直しタイマーを止める */
+async function hidePlan($: EngineInterface) {
   holdTimer?.cancel()
   holdTimer = null
+  syncTicker($, false)
+  await update($, planAtom, p => (p ? { ...p, shown: false } : p))
+}
+
+/**
+ * 計画を丸ごと置き換える
+ * 全完了なら DONE_HOLD_MS 後に表示を消す。題名がなければ、作業途中の前の計画からだけ題名を引き継ぐ。
+ * 完了数か実行中の手順が変わったときは、いまバーが描いている割合を起点にして新しい位置へ動かす。
+ * 同じ状態の送り直しでは起点を保ち、バーを巻き戻さない。止めていたバーは、止めた位置から動かし直す。前の計画が隠れていれば 0 から動かす。
+ */
+async function applyPlan($: EngineInterface, title: string | undefined, steps: PlanStep[]) {
+  const now = await $.clock.now()
+  await update($, planAtom, old => {
+    const next: Plan = {
+      title: title || (old && !isAllDone(old.steps) ? old.title : '') || 'Plan',
+      steps,
+      shown: steps.length > 0,
+      from: 0,
+      at: now,
+    }
+    if (old?.shown && !old.paused && progressKey(old.steps) === progressKey(steps)) return { ...next, from: old.from, at: old.at }
+    if (old?.shown) return { ...next, from: shownRatio(old, now) }
+    return next
+  })
+  holdTimer?.cancel()
+  holdTimer = null
+  syncTicker($, steps.length > 0)
   if (isAllDone(steps)) {
     holdTimer = $.clock.after(DONE_HOLD_MS, () => {
       holdTimer = null
-      void update($, planAtom, p => (p ? { ...p, shown: false } : p)).catch(err => warn($, err))
+      void hidePlan($).catch(err => warn($, err))
     })
   }
 }
@@ -179,10 +246,12 @@ export const register: Register = on => {
         isDeferred: false,
       })
       .catch(err => warn($, err))
-    // reload で保留タイマーが消えるため、全完了の計画はここで隠す。表示の失敗でセッションの開始を止めない
+    // reload で保留タイマーと描き直しタイマーが消えるため、全完了の計画はここで隠し、作業途中の計画は描き直しを張り直す。
+    // 表示の失敗でセッションの開始を止めない
     try {
       const plan = await read($, planAtom)
-      if (plan?.shown && isAllDone(plan.steps)) await update($, planAtom, p => (p ? { ...p, shown: false } : p))
+      if (plan?.shown && isAllDone(plan.steps)) await hidePlan($)
+      else syncTicker($, !!plan?.shown && !plan.paused)
     }
     catch (err) {
       warn($, err)
@@ -205,11 +274,7 @@ export const register: Register = on => {
       resetNudge()
       try {
         const plan = await read($, planAtom)
-        if (plan?.shown && isAllDone(plan.steps)) {
-          holdTimer?.cancel()
-          holdTimer = null
-          await update($, planAtom, p => (p ? { ...p, shown: false } : p))
-        }
+        if (plan?.shown && isAllDone(plan.steps)) await hidePlan($)
       }
       catch (err) {
         warn($, err)
@@ -218,16 +283,23 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // メインのターンが回答で終わったとき、未完了の計画は全完了として扱う（中断、拒否、エラーで終わったターンとサブエージェントは除く）
+  // メインのターンが回答で終わったとき、未完了の計画は全完了として扱う（サブエージェントのターンは除く）
   // モデルが最終回答の前に最後の手順を completed にし忘れると、バーが途中のまま残るため（利用者の判断）。
-  // 質問のために途中で止まった場合も 100% になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる
+  // 質問のために途中で止まった場合も 100% になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる。
+  // 中断、拒否、エラーで終わったときは、作業が止まったのでバーをその位置で止め、描き直しも止める（利用者の判断）
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId !== undefined || e.reason !== 'answer') return r
+    if (e.agentId !== undefined) return r
     try {
       const plan = await read($, planAtom)
-      if (plan?.shown && !isAllDone(plan.steps)) {
+      if (!plan?.shown || isAllDone(plan.steps)) return r
+      if (e.reason === 'answer') {
         await applyPlan($, plan.title, plan.steps.map(st => ({ ...st, status: 'completed' as const })))
+      }
+      else {
+        const now = await $.clock.now()
+        syncTicker($, false)
+        await update($, planAtom, p => (p ? { ...p, from: shownRatio(p, now), at: now, paused: true } : p))
       }
     }
     catch (err) {
@@ -242,6 +314,7 @@ export const register: Register = on => {
       resetNudge()
       holdTimer?.cancel()
       holdTimer = null
+      syncTicker($, false)
       await update($, planAtom, () => null).catch(err => warn($, err))
     }
     return next(e)
@@ -284,23 +357,32 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const w = e.props.bodyColumns > 0 ? Math.floor(e.props.bodyColumns) : BAR_FALLBACK
 
-    // 1 行目：完了の区間、残り、件数、百分率（実行中の手順は 2 行目で示し、バーでは区別しない）
-    // 2 行目：「題名：いまの手順」（実行中がなければ次の手順か All steps done。全角の幅も画面側の truncate-end が数えて切る）
+    // 1 行目：「題名：いまの手順」（実行中がなければ次の手順か All steps done。全角の幅も画面側の truncate-end が数えて切る）
+    // 2 行目：完了の区間、残り、件数、百分率（実行中の手順は 1 行目で示し、バーでは区別しない）
+    // 題名の行を上、バーを下に置く（利用者の指定）
+    // 件数と百分率は完了した手順だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
     const n = plan.steps.length
     const done = doneCount(plan.steps)
     const pct = `${Math.round((done / n) * 100)}%`
     const label = `Tasks ${done}/${n}`
-    const now = plan.steps.find(st => st.status === 'in_progress')
+    const current = plan.steps.find(st => st.status === 'in_progress')
     const nextUp = plan.steps.find(st => st.status === 'pending')
-    const line = now ? now.text : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
+    const line = current ? current.text : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
     // バーは件数と百分率と、その間の空白 2 つを除いた残りの幅いっぱいに描く
     const barW = Math.max(6, w - label.length - pct.length - 2)
-    const fillC = Math.round((barW * done) / n)
+    // 切り捨てで数え、実行中の区間が四捨五入で終端まで埋まって完了に見えるのを防ぐ（小数の誤差で 1 セル欠けないよう微小な値を足す）
+    const fillC = Math.min(barW, Math.max(0, Math.floor(barW * shownRatio(plan, await $.clock.now()) + 1e-9)))
 
     return (
       <Box flexDirection="column">
         {rest as never}
         <Box key="task-bar" flexDirection="column">
+          <Box key="plan-line" width={w}>
+            <Text wrap="truncate-end">
+              <Text bold>{plan.title}</Text>
+              {line ? <Text dimColor>{`：${line}`}</Text> : null}
+            </Text>
+          </Box>
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>
             <Text>
               <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
@@ -310,12 +392,6 @@ export const register: Register = on => {
               {label}
             </Text>
             <Text dimColor>{pct}</Text>
-          </Box>
-          <Box key="plan-line" width={w}>
-            <Text wrap="truncate-end">
-              <Text bold>{plan.title}</Text>
-              {line ? <Text dimColor>{`：${line}`}</Text> : null}
-            </Text>
           </Box>
         </Box>
       </Box>

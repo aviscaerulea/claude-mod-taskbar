@@ -215,6 +215,82 @@ test('T15 メインのターンが回答で終わると、未完了の計画を�
   await ui.unmount()
 })
 
+test('T16 バーは実行中の区間を時間で伸ばし、完了で次の位置へ 1 秒かけて動く', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  /** 完了区間の太線がちょうど cells セルあることを確かめる */
+  const expectFill = async (cells: number) => {
+    const ui = await $.ui.mount(BAND)
+    expect(await ui.find({ type: 'Text', text: '━'.repeat(cells) })).toBeDefined()
+    await ui.unmount()
+  }
+
+  // 幅 67 セルのバーで、1 件目の区間（20%）の半分まで 30 秒で伸びる（6.7 セルを切り捨てて 6）
+  await clock.advance(30_000)
+  await expectFill(6)
+  // 同じ状態の送り直しでは位置を変えない
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  await expectFill(6)
+
+  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 66 セル）
+  const second = steps.map((st, i) => ({ ...st, status: i === 0 ? 'completed' : i === 1 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: second } as never)
+  await expectFill(6)
+  await clock.advance(500)
+  await expectFill(9)
+
+  // 1 件だけの計画を長く実行しても、区間の終端（全幅 67 セル）までは埋めない
+  await $.tool.call({ tool: PLAN_TOOL, steps: [{ text: 'only', status: 'in_progress' }] } as never)
+  await clock.advance(600_000)
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(66) })).toBeDefined()
+  await ui.unmount()
+})
+
+test('T17 ターンが中断で終わると、バーをその位置で止め、次の計画から動かし直す', async ($, on) => {
+  const clock = engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  /** 完了区間の太線がちょうど cells セルあることを確かめる */
+  const expectFill = async (cells: number) => {
+    const ui = await $.ui.mount(BAND)
+    expect(await ui.find({ type: 'Text', text: '━'.repeat(cells) })).toBeDefined()
+    await ui.unmount()
+  }
+  await clock.advance(30_000)
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
+  await clock.advance(60_000)
+  await expectFill(6)
+
+  // 同じ状態の計画が届くと、止めた位置から伸び直す（巻き戻さない）
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  await expectFill(6)
+  await clock.advance(60_000)
+  await expectFill(11)
+})
+
+test('T18 止めたバーより手前から始まる計画が届くと、バーをその位置へ戻して伸ばす', async ($, on) => {
+  const clock = engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 2 件完了、3 件目を実行中のまま中断で止める
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await clock.advance(30_000)
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
+
+  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 67 セル）
+  const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  await clock.advance(30_000)
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(6) })).toBeDefined()
+  await ui.unmount()
+})
+
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
