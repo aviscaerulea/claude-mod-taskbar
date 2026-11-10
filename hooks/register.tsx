@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Plan, PlanStatus, PlanStep } from '../types'
+import type { Job, Plan, PlanStatus, PlanStep } from '../types'
 
 // モデルが呼ぶ計画ツールの完全名（$.tool.register の name は「plan」）
 const PLAN_TOOL = 'mcp__task-bar__plan'
@@ -26,6 +26,9 @@ const TICK_MS = 250
 const BAR_FALLBACK = 30
 // plan ツールが受け付ける手順の状態
 const STATUSES: readonly PlanStatus[] = ['pending', 'in_progress', 'completed']
+// 終了通知の task.status と、エージェント一覧の status のうち、作業単位を完了として扱う値
+// killed は TaskStop 以外の停止、つまり利用者が画面で止めたときに届く（どちらも実機で確認済み）
+const ENDED: readonly string[] = ['completed', 'failed', 'killed']
 
 // バーの完了区間と、件数の文字
 const BAR_COLOR = '#6b8fc6'
@@ -69,28 +72,50 @@ const oneLine = (t: string) => t.replace(/\s+/g, ' ').trim()
 const isStatus = (v: unknown): v is PlanStatus => typeof v === 'string' && (STATUSES as readonly string[]).includes(v)
 /** completed の手順の数 */
 const doneCount = (steps: PlanStep[]) => steps.filter(st => st.status === 'completed').length
-/** 手順が 1 つ以上あり、すべて completed か */
+/** 手順が 1 つ以上あり、すべて completed か（催促と題名の引き継ぎは手順だけで判断する） */
 const isAllDone = (steps: PlanStep[]) => steps.length > 0 && steps.every(st => st.status === 'completed')
 
-/** 完了数と実行中の手順の位置をまとめた値（これが変わったときだけバーの動きの起点を置き直す） */
-const progressKey = (steps: PlanStep[]) => `${doneCount(steps)}/${steps.length}/${steps.findIndex(st => st.status === 'in_progress')}`
+/** 計画の作業単位（reload 前の版が書いた値には無いので空とする） */
+const jobsOf = (plan: Plan | null) => plan?.jobs ?? []
+/**
+ * 手順と作業単位を合わせた件数 n と完了数 done
+ * バーの件数、百分率、割合はこの値で数え、サブエージェント 1 体とシェルコマンド 1 本をそれぞれ 1 件とする（利用者の指定）。
+ */
+function units(plan: Plan) {
+  const jobs = jobsOf(plan)
+  return { n: plan.steps.length + jobs.length, done: doneCount(plan.steps) + jobs.filter(j => j.done).length }
+}
+/** 未完了の作業単位の数 */
+const runningJobs = (plan: Plan | null) => jobsOf(plan).filter(j => !j.done).length
+/** 手順と作業単位が 1 つ以上あり、すべて完了か（作業単位が残る間は、手順が全完了でも計画を終えない） */
+function isPlanDone(plan: Plan) {
+  const u = units(plan)
+  return u.n > 0 && u.done === u.n
+}
+
+/** 完了数、件数、実行中の手順の位置、未完了の作業単位の数をまとめた値（これが変わったときだけバーの動きの起点を置き直す） */
+function progressKey(plan: Plan) {
+  const u = units(plan)
+  return `${u.done}/${u.n}/${plan.steps.findIndex(st => st.status === 'in_progress')}/${runningJobs(plan)}`
+}
 
 /**
  * 時刻 now にバーが描く割合（0〜1）を求める
- * 実行中の手順があれば、その区間を起点から CREEP_HALF_MS ごとに残りの半分ずつ伸ばし、完了の報告が届くまで区間の終端には届かせない。
+ * 件数と完了数は手順と作業単位を合わせて数える（units）。
+ * 実行中の手順か未完了の作業単位があれば、次の 1 件の区間を起点から CREEP_HALF_MS ごとに残りの半分ずつ伸ばし、完了の報告が届くまで区間の終端には届かせない。
  * 伸ばす起点は、完了数の位置と起点の割合 from の大きい方とし、止めた位置から再開してもバーを巻き戻さない。
  * from が区間の終端を超えるとき（完了数の少ない計画に置き換わったとき）は、完了数の位置から伸ばし、バーはそこへ戻る。
  * 起点 at から CATCH_MS の間は、from からその位置へ動かす。paused の計画は from の位置で止めたまま描く。
  * from と at が無い計画（reload 前の版の値）は、完了数の位置で止まったものとして描く。
  */
 function shownRatio(plan: Plan, now: number) {
-  const n = plan.steps.length
+  const { n, done } = units(plan)
   if (!n) return 0
-  const base = doneCount(plan.steps) / n
+  const base = done / n
   const from = plan.from ?? base
   if (plan.paused) return from
   const dt = Math.max(0, now - (plan.at ?? now))
-  const running = plan.steps.some(st => st.status === 'in_progress')
+  const running = plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0
   const end = running ? base + 1 / n : base
   const lo = from < end ? Math.max(base, from) : base
   const target = running ? lo + (end - lo) * (1 - 0.5 ** (dt / CREEP_HALF_MS)) : base
@@ -144,37 +169,87 @@ async function hidePlan($: EngineInterface) {
 }
 
 /**
- * 計画を丸ごと置き換える
- * 全完了なら DONE_HOLD_MS 後に表示を消す。題名がなければ、作業途中の前の計画からだけ題名を引き継ぐ。
- * 完了数か実行中の手順が変わったときは、いまバーが描いている割合を起点にして新しい位置へ動かす。
+ * applyPlan が古い計画から作る、新しい計画の題名、手順、作業単位
+ * keepPause は、作業単位の出入りだけを反映する更新の印で、中断で止めた計画を止めたまま書き換える（applyPlan の説明を参照）。
+ */
+type PlanChange = { title?: string; steps: PlanStep[]; jobs: Job[]; keepPause?: boolean }
+
+/**
+ * 計画を、古い計画から作った内容で丸ごと置き換える
+ * 内容は make が update の中で古い計画から作る。サブエージェントの終了と手順の送り直しが続けて届いても、先の更新を古い値で上書きしないため。
+ * 手順と作業単位がすべて完了なら DONE_HOLD_MS 後に表示を消す。題名がなければ、作業途中の前の計画からだけ題名を引き継ぎ、手順もなければ空にする。
+ * 完了数か実行中が変わったときは、いまバーが描いている割合を起点にして新しい位置へ動かす。
  * 同じ状態の送り直しでは起点を保ち、バーを巻き戻さない。止めていたバーは、止めた位置から動かし直す。前の計画が隠れていれば 0 から動かす。
  * 経過時間は、表示中の計画からはそこまでの値を引き継ぎ、隠れた後の計画では 0 から数える。全完了の計画では数えるのを止める。
+ * keepPause の更新（作業単位の追加、完了、捨て）では、中断で止めた計画の paused、バーの位置、経過時間をそのまま保ち、件数だけを変える。
+ * 中断した計画は、次に計画が届くまで止めたままにするため（利用者の判断で、バックグラウンド作業が動き続けていても同じ）。
+ * ただし手順と作業単位がすべて完了になったときは、止めたままにせず全完了として扱い、100% にして DONE_HOLD_MS 後に消す。
  */
-async function applyPlan($: EngineInterface, title: string | undefined, steps: PlanStep[]) {
+async function applyPlan($: EngineInterface, make: (old: Plan | null) => PlanChange) {
   const now = await $.clock.now()
+  let made: Plan | null = null
   await update($, planAtom, old => {
+    const c = make(old)
+    const done = isPlanDone({ title: '', steps: c.steps, jobs: c.jobs, shown: true })
+    if (c.keepPause && old?.shown && old.paused && !done) {
+      made = { ...old, steps: c.steps, jobs: c.jobs }
+      return made
+    }
     const next: Plan = {
-      title: title || (old && !isAllDone(old.steps) ? old.title : '') || 'Plan',
-      steps,
-      shown: steps.length > 0,
+      // 手順のない計画は題名を空のまま持ち、描画で Background と出す（後から届いた計画が Background を題名として引き継がないように）
+      title: c.title || (old && !isAllDone(old.steps) ? old.title : '') || (c.steps.length ? 'Plan' : ''),
+      steps: c.steps,
+      jobs: c.jobs,
+      shown: c.steps.length + c.jobs.length > 0,
       from: 0,
       at: now,
       spent: old?.shown ? elapsedMs(old, now) : 0,
-      startedAt: isAllDone(steps) ? undefined : now,
+      startedAt: done ? undefined : now,
     }
-    if (old?.shown && !old.paused && progressKey(old.steps) === progressKey(steps)) return { ...next, from: old.from, at: old.at }
-    if (old?.shown) return { ...next, from: shownRatio(old, now) }
-    return next
+    made = old?.shown && !old.paused && progressKey(old) === progressKey(next)
+      ? { ...next, from: old.from, at: old.at }
+      : old?.shown ? { ...next, from: shownRatio(old, now) } : next
+    return made
   })
+  // made は update のコールバック内で代入するため、型の絞り込みが null のままにならないよう型を明示して読む
+  const shown = made as Plan | null
   holdTimer?.cancel()
   holdTimer = null
-  syncTicker($, steps.length > 0)
-  if (isAllDone(steps)) {
+  syncTicker($, !!shown?.shown && !shown.paused)
+  if (shown && isPlanDone(shown)) {
     holdTimer = $.clock.after(DONE_HOLD_MS, () => {
       holdTimer = null
       void hidePlan($).catch(err => warn($, err))
     })
   }
+}
+
+/**
+ * 作業単位を未完了として計画に加える（同じ id があれば置き換え、再開したサブエージェントを未完了に戻す）
+ * 表示中の計画の手順と題名はそのまま残す。計画がないか隠れていれば、手順のない計画として表示する。
+ */
+async function addJob($: EngineInterface, job: Job) {
+  await applyPlan($, old => ({
+    title: old?.shown ? old.title : undefined,
+    steps: old?.shown ? old.steps : [],
+    jobs: [...(old?.shown ? jobsOf(old) : []).filter(j => j.id !== job.id), job],
+    keepPause: true,
+  }))
+}
+
+/**
+ * id の作業単位を完了にする（kind を渡すと、その種類の作業単位だけを対象にする）
+ * 表示中の計画に未完了のその作業単位があるときだけ書き換える。終了通知の行は描画のたびと reload のたびに届き直すため、何度呼ばれても結果は同じになる。
+ */
+async function finishJob($: EngineInterface, id: string, kind?: Job['kind']) {
+  const plan = await read($, planAtom)
+  if (!plan?.shown || !jobsOf(plan).some(j => j.id === id && !j.done && (!kind || j.kind === kind))) return
+  await applyPlan($, old => ({
+    title: old?.title,
+    steps: old?.steps ?? [],
+    jobs: jobsOf(old).map(j => (j.id === id ? { ...j, done: true } : j)),
+    keepPause: true,
+  }))
 }
 
 /**
@@ -193,7 +268,9 @@ async function planFromTool($: EngineInterface, args: Record<string, unknown>): 
     if (!isStatus(o.status)) return reject(`"${cut(text, 40)}" needs a status of pending, in_progress or completed.`)
     steps.push({ text, status: o.status })
   }
-  await applyPlan($, typeof args.title === 'string' ? oneLine(args.title) : undefined, steps)
+  // 表示中の計画の作業単位は引き継ぐ（隠れた計画の作業単位はすべて完了済みなので捨てる）
+  const title = typeof args.title === 'string' ? oneLine(args.title) : undefined
+  await applyPlan($, old => ({ title, steps, jobs: old?.shown ? jobsOf(old) : [] }))
   return { saved: true, text: `Plan saved: ${doneCount(steps)} of ${steps.length} steps done.`, done: doneCount(steps) }
 }
 
@@ -233,8 +310,45 @@ async function withNudge<R>($: EngineInterface, r: R): Promise<R> {
 }
 
 /**
+ * メインの会話のツール結果から作業単位を記録する
+ * Bash の結果に backgroundTaskId があれば、バックグラウンドのシェルコマンドとして加える（Ctrl+B やタイムアウトで後から裏へ回ったものも含む）。
+ * TaskStop で止めた作業には終了通知が来ないため（実機で確認済み）、結果の task_id（無ければ入力の task_id）の作業単位をここで完了にする。
+ * 拒否やエラーで終わった呼び出しは、作業を起動も停止もしていないので何もしない（停止に失敗した作業を完了にしないため）。
+ */
+async function trackJob($: EngineInterface, tool: string, input: Record<string, unknown>, r: unknown) {
+  if (!r || typeof r !== 'object' || 'deny' in r || (r as { isError?: boolean }).isError === true) return
+  const res = (r as { result?: unknown }).result
+  if (tool === 'Bash') {
+    const bg = res && typeof res === 'object' ? (res as { backgroundTaskId?: unknown }).backgroundTaskId : undefined
+    if (typeof bg !== 'string' || !bg) return
+    const label = oneLine(String(input.description || input.command || 'shell'))
+    await addJob($, { id: bg, kind: 'shell', label, done: false })
+  }
+  else if (tool === 'TaskStop') {
+    const stopped = stoppedId(res) ?? (typeof input.task_id === 'string' ? input.task_id : undefined)
+    if (stopped) await finishJob($, stopped)
+  }
+}
+
+/** TaskStop の結果（JSON の文字列かオブジェクト）から、止めた作業の task_id を取り出す（取れなければ undefined） */
+function stoppedId(res: unknown): string | undefined {
+  let o: unknown = res
+  if (typeof res === 'string') {
+    try {
+      o = JSON.parse(res)
+    }
+    catch {
+      return undefined
+    }
+  }
+  const id = o && typeof o === 'object' ? (o as { task_id?: unknown }).task_id : undefined
+  return typeof id === 'string' && id ? id : undefined
+}
+
+/**
  * mod のフックを登録する
  * plan ツールの登録、システムプロンプトへの指示、催促文、回答終了時の完了の補完、プロンプト上の計画バーの描画を担う。
+ * メインの会話が起こしたサブエージェントとバックグラウンドのシェルコマンドも、1 件ずつ作業単位としてバーの件数に加える。
  */
 export const register: Register = on => {
   // plan ツールを登録し、reload 前の全完了の計画を隠す
@@ -273,7 +387,7 @@ export const register: Register = on => {
     // 表示の失敗でセッションの開始を止めない
     try {
       const plan = await read($, planAtom)
-      if (plan?.shown && isAllDone(plan.steps)) await hidePlan($)
+      if (plan?.shown && isPlanDone(plan)) await hidePlan($)
       else syncTicker($, !!plan?.shown && !plan.paused)
     }
     catch (err) {
@@ -291,13 +405,16 @@ export const register: Register = on => {
 
   // 利用者が送ったプロンプトは新しい作業として、催促を数え直す（通知やスケジュール実行では数え続ける）
   // 全完了の計画は、20 秒の保留を待たずにここで隠す。モデルが新しい計画を送るまで前回の表示が残って見えるため（利用者の判断）。
-  // 作業途中の計画は、続きの指示かもしれないので残す。表示の失敗で送信を止めない
+  // 作業途中の計画は、続きの指示かもしれないので残す。ただし完了済みの作業単位は前の依頼のものとして捨て、未完了のものは残す。表示の失敗で送信を止めない
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
       resetNudge()
       try {
         const plan = await read($, planAtom)
-        if (plan?.shown && isAllDone(plan.steps)) await hidePlan($)
+        if (plan?.shown && isPlanDone(plan)) await hidePlan($)
+        else if (plan?.shown && jobsOf(plan).some(j => j.done)) {
+          await applyPlan($, old => ({ title: old?.title, steps: old?.steps ?? [], jobs: jobsOf(old).filter(j => !j.done), keepPause: true }))
+        }
       }
       catch (err) {
         warn($, err)
@@ -306,18 +423,51 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // メインのターンが回答で終わったとき、未完了の計画は全完了として扱う（サブエージェントのターンは除く）
+  // メインの会話が起動したサブエージェントを作業単位として件数に加える（フォアグラウンドもバックグラウンドも 1 体 1 件）
+  // サブエージェント内部の手順は数えない（利用者の指定）。入れ子のサブエージェント、teammate、Workflow 内部の agent も数えない。
+  // 再開（resume）はその id の作業単位を未完了に戻す。起動を断られたものは加えない。数えられなくても起動は止めない
+  // 作業単位を加えた後に、エージェント一覧でその id がもう終わっていないかを突き合わせ、終わっていれば完了にする。
+  // 起動直後に終わると、ここへ戻る前に turn.complete が届き、作業単位が無いので finishJob が何もしないまま過ぎるため。
+  // 突き合わせは作業単位を加えた後に行うので、終了がその前に届いても後に届いても取りこぼさない（再開の実行も同じ）
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    if (e.parentAgentId !== undefined || e.isTeammate || e.workflow || r.deny !== undefined) return r
+    const id = e.resume?.agentId ?? r.agentId
+    if (!id) return r
+    try {
+      await addJob($, { id, kind: 'agent', label: oneLine(e.description || e.subagentType), done: false })
+      const row = (await $.agent.list()).find(a => a.id === id)
+      if (row && ENDED.includes(row.status)) await finishJob($, id)
+    }
+    catch (err) {
+      warn($, err)
+    }
+    return r
+  })
+
+  // サブエージェントのターンが終わったとき、その作業単位を完了にする（1 回の実行が 1 ターン。実機で、同じ agentId で届くことを確認済み）
+  // 利用者が画面から止めたときも、reason が aborted の turn.complete が同じ agentId で届く（実機で確認済み）ので、終わり方は問わない。
+  // その id の作業単位がまだ無いとき（起動直後に終わった場合）は何もせず、agent.spawn 側の突き合わせに任せる。
+  // メインのターンが回答で終わったとき、未完了の手順は全完了として扱う。
   // モデルが最終回答の前に最後の手順を completed にし忘れると、バーが途中のまま残るため（利用者の判断）。
-  // 質問のために途中で止まった場合も 100% になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる。
+  // 未完了の作業単位が残る間は、手順が全完了でも計画は終わらず、バーは 100% にならない（作業単位の終了で完了する）。
+  // 質問のために途中で止まった場合も手順は全完了になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる。
   // 中断、拒否、エラーで終わったときは、作業が止まったのでバーと経過時間をその位置で止め、描き直しも止める（利用者の判断）
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId !== undefined) return r
+    if (e.agentId !== undefined) {
+      await finishJob($, e.agentId).catch(err => warn($, err))
+      return r
+    }
     try {
       const plan = await read($, planAtom)
       if (!plan?.shown || isAllDone(plan.steps)) return r
       if (e.reason === 'answer') {
-        await applyPlan($, plan.title, plan.steps.map(st => ({ ...st, status: 'completed' as const })))
+        await applyPlan($, old => ({
+          title: old?.title,
+          steps: (old?.steps ?? []).map(st => ({ ...st, status: 'completed' as const })),
+          jobs: jobsOf(old),
+        }))
       }
       else {
         const now = await $.clock.now()
@@ -368,33 +518,56 @@ export const register: Register = on => {
       }
       return { result: said.text } as never
     }
-    // 催促はメインセッションのツール結果にだけ付ける
+    // 催促と作業単位の記録は、メインセッションのツール呼び出しだけで行う
     if (id) return next(e)
-    return withNudge($, await next(e))
+    const r = await next(e)
+    try {
+      await trackJob($, tool, e as unknown as Record<string, unknown>, r)
+    }
+    catch (err) {
+      warn($, err)
+    }
+    return withNudge($, r)
+  })
+
+  // 終了通知の行で、シェルコマンドの作業単位を完了にする
+  // 行にはエンジンが通知を解析した task（id と status）が付くので、通知本文の書式には依存しない（利用者の判断）。
+  // 画面外の行でも描かれ、reload のたびに過去の行も描き直されるが、finishJob は未完了の作業単位だけを変えるので結果は変わらない。
+  // サブエージェントは対象にしない。再開すると同じ id の作業単位が未完了に戻るため、前の実行の通知の行が描き直されると、実行中なのに完了になってしまう。
+  // サブエージェントの終了は turn.complete と TaskStop で拾う
+  // 描画を待たせないよう、完了の記録は待たずに描画の結果を返す
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const r = await next(e)
+    const task = e.props.task
+    if (task?.id && task.status !== undefined && ENDED.includes(task.status)) void finishJob($, task.id, 'shell').catch(err => warn($, err))
+    return r
   })
 
   // プロンプト上に計画バーを描く（ターミナルだけ）
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
     const plan = await read($, planAtom)
-    if (!plan || !plan.shown || !plan.steps.length) return next(e)
+    if (!plan || !plan.shown || !units(plan).n) return next(e)
     // 他の mod のバンドは上に残す。エンジン自身の表示は入れ子にしない
     const drawn = await Promise.resolve(next(e)).catch(() => null)
     const rest = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
     const { Box, Text } = $.ui.resolve(e)
     const w = e.props.bodyColumns > 0 ? Math.floor(e.props.bodyColumns) : BAR_FALLBACK
 
-    // 1 行目：「題名：いまの手順」（実行中がなければ次の手順か All steps done。全角の幅も画面側の truncate-end が数えて切る）
+    // 1 行目：「題名：いまの手順 · N running in background」（全角の幅も画面側の truncate-end が数えて切る）
+    //   いまの手順は、実行中の手順、次の手順、All steps done の順に選ぶ。手順が全完了で作業単位が残るときは出さない。
+    //   未完了の作業単位があるときだけ、その数を末尾に出す
     // 2 行目：完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
     // 題名の行を上、バーを下に置く（利用者の指定）
-    // 件数と百分率は完了した手順だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
-    const n = plan.steps.length
-    const done = doneCount(plan.steps)
+    // 件数と百分率は、完了した手順と作業単位だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
+    const { n, done } = units(plan)
+    const bg = runningJobs(plan)
     const pct = `${Math.round((done / n) * 100)}%`
     const label = `Tasks ${done}/${n}`
     const current = plan.steps.find(st => st.status === 'in_progress')
     const nextUp = plan.steps.find(st => st.status === 'pending')
     const line = current ? current.text : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
+    const title = plan.title || 'Background'
     // 右端には計画の開始からの経過時間を出す（全完了と中断で止まる。利用者の指定）
     const now = await $.clock.now()
     const time = clockText(elapsedMs(plan, now))
@@ -411,8 +584,9 @@ export const register: Register = on => {
         <Box key="task-bar" flexDirection="column">
           <Box key="plan-line" width={w}>
             <Text wrap="truncate-end">
-              <Text bold>{plan.title}</Text>
+              <Text bold>{title}</Text>
               {line ? <Text dimColor>{`：${line}`}</Text> : null}
+              {bg ? <Text dimColor>{` · ${bg} running in background`}</Text> : null}
             </Text>
           </Box>
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>

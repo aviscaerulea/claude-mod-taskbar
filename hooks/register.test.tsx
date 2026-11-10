@@ -13,12 +13,25 @@ const BAND = {
   props: { hasSurvey: false, isWorking: true, maxRows: 20, bodyColumns: 80, scroll: { offset: 0, bodyRows: 20 }, view: {} },
 } as const
 
+// エンジン役が $.agent.list() に返す一覧（engine() のたびに空へ戻し、テストが書き換える）
+let agentRows: { id: string; status: string; description: string; type: string }[] = []
+
 /** プラグインの下に置くエンジン役のフックと、動かせる時計を用意する */
 function engine(on: On) {
+  agentRows = []
+  on('agent.list', () => ({ value: agentRows }) as never)
   on('tool.register', (_, e) => ({ value: { tool: `mcp__task-bar__${e.name}` } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  // command が fail の呼び出しだけエラーで終える
-  on('tool.call', (_, e) => ((e as { command?: string }).command === 'fail' ? { result: 'boom', isError: true } : { result: {} }) as never)
+  // command が fail の呼び出しだけエラーで終え、bg の Bash はバックグラウンドへ回したものとして ID を返す。TaskStop は止めた ID を返す
+  on('tool.call', (_, e) => {
+    const o = e as { tool: string; command?: string; task_id?: string }
+    if (o.command === 'fail') return { result: 'boom', isError: true } as never
+    if (o.tool === 'Bash' && o.command === 'bg') return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' } } as never
+    if (o.tool === 'TaskStop') return { result: { message: 'stopped', task_id: o.task_id, task_type: 'local_bash' } } as never
+    return { result: {} } as never
+  })
+  // 起動したサブエージェントの ID は、入力の name（無ければ a1）とする
+  on('agent.spawn', (_, e) => ({ model: 'm', agentId: (e as { name?: string }).name ?? 'a1' }))
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('prompt.compose', () => ({ sections: [] }))
   on('ui.render', ($, e) => {
@@ -356,6 +369,188 @@ test('T19 経過時間は計画の開始から数え、中断と全完了で止�
   const ui = await $.ui.mount(BAND)
   expect(await ui.find({ type: 'Text', text: '▶' })).toBeUndefined()
   await ui.unmount()
+})
+
+/** メインの会話からサブエージェントを起動する（extra で入れ子や teammate の印を足す） */
+const spawn = ($: Engine, extra: Record<string, unknown> = {}) =>
+  $.agent.spawn({
+    prompt: 'p', description: 'scan', subagentType: 'Explore', background: true, fork: false, parentModel: 'm',
+    tool_use_id: 't', provider: { plugin: 'engine', tier: 'core' }, ...extra,
+  } as never)
+
+/** 終了通知の行を、エンジンが解析した task 付きで描かせる */
+async function notify($: Engine, id: string, status: string) {
+  const ui = await $.ui.mount({
+    plugin: 'task-bar', component: 'UserMessage', surface: 'terminal',
+    props: { text: 'n', origin: { kind: 'task-notification' }, isExpanded: false, task: { id, status } },
+  } as never)
+  await ui.unmount()
+}
+
+/** バンドに text の Text があるか（absent なら無いこと）を確かめる */
+async function expectBand($: Engine, texts: string[], absent: string[] = []) {
+  const ui = await $.ui.mount(BAND)
+  for (const text of texts) expect(await ui.find({ type: 'Text', text })).toBeDefined()
+  for (const text of absent) expect(await ui.find({ type: 'Text', text })).toBeUndefined()
+  await ui.unmount()
+}
+
+/** サブエージェントのターンの終了 */
+const agentEnd = (agentId: string) => ({ answer: 'done', durationMs: 1, turnId: 't2', isAborted: false, reason: 'answer', agentId }) as never
+
+test('T20 サブエージェントは 1 件として数え、終わるまで回答の終了でも 100% にしない', async ($, on) => {
+  engine(on)
+  on('turn.complete', () => ({ text: 'answer' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await spawn($)
+  await expectBand($, ['Tasks 2/6'])
+
+  await $.turn.complete({ answer: 'done', durationMs: 1, turnId: 't1', isAborted: false, reason: 'answer' } as never)
+  await expectBand($, ['Tasks 5/6', ' · 1 running in background'], ['100%', 'All steps done'])
+
+  await $.turn.complete(agentEnd('a1'))
+  await expectBand($, ['Tasks 6/6', '100%', 'All steps done'], [' · 1 running in background'])
+})
+
+test('T21 バックグラウンドのシェルコマンドは終了通知で完了し、全完了の 20 秒後に消える', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await $.tool.call({ tool: 'Bash', command: 'bg' })
+  await expectBand($, ['Tasks 5/6', ' · 1 running in background'])
+
+  await notify($, 'b1', 'running')
+  await expectBand($, ['Tasks 5/6'])
+  await notify($, 'b1', 'completed')
+  await expectBand($, ['Tasks 6/6', '100%'])
+  // 同じ通知の行が描き直されても変わらない
+  await notify($, 'b1', 'completed')
+  await expectBand($, ['Tasks 6/6'])
+
+  await clock.advance(20_000)
+  await expectNothingDrawn($)
+})
+
+test('T21b TaskStop で止めた作業は通知なしで完了にする', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await $.tool.call({ tool: 'Bash', command: 'bg' })
+  await expectBand($, ['Tasks 2/6'])
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1' } as never)
+  await expectBand($, ['Tasks 3/6'], [' · 1 running in background'])
+})
+
+test('T22 入れ子、teammate、Workflow 内部の agent と、サブエージェントの Bash は数えない', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await spawn($, { parentAgentId: 'x', name: 'n1' })
+  await spawn($, { isTeammate: true, name: 'n2' })
+  await spawn($, { workflow: { runId: 'wf_1', agentIndex: 1 }, name: 'n3' })
+  await $.tool.call({ tool: 'Bash', command: 'bg', agentId: 'id-A' })
+  await expectBand($, ['Tasks 2/5'])
+})
+
+test('T23 プロンプト送信で、完了済みの作業単位を捨て、未完了のものは残す', async ($, on) => {
+  engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await spawn($, { name: 'a1' })
+  await spawn($, { name: 'a2' })
+  await $.turn.complete(agentEnd('a1'))
+  await expectBand($, ['Tasks 3/7'])
+  await $.prompt.submit(submitOf('more'))
+  await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
+})
+
+test('T24 計画がなくても、作業単位だけで Background のバーを出す', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await spawn($)
+  await expectBand($, ['Background', 'Tasks 0/1', ' · 1 running in background'])
+  // 後から届いた題名なしの計画は Background を引き継がない
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await expectBand($, ['Plan', 'Tasks 2/6'])
+})
+
+test('T25 TaskStop で止めたサブエージェントも完了にする', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await spawn($)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'a1' } as never)
+  await expectBand($, ['Tasks 3/6'])
+})
+
+test('T26 中断で止めた計画は、作業単位の出入りでは止めたまま件数だけ変え、全完了で 100% にする', async ($, on) => {
+  const clock = engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await spawn($)
+  await clock.advance(30_000)
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
+  const ui = await $.ui.mount(BAND)
+  const bar = (await ui.find({ type: 'Text', text: /^━+$/ }))
+  await ui.unmount()
+
+  // 作業単位の追加と完了の後も、バーの位置と経過時間は止めたまま
+  await clock.advance(60_000)
+  await $.tool.call({ tool: 'Bash', command: 'bg' })
+  await $.turn.complete(agentEnd('a1'))
+  await clock.advance(60_000)
+  await expectBand($, ['Tasks 3/7', '0:00:30'])
+  const after = await $.ui.mount(BAND)
+  expect(await after.find({ type: 'Text', text: /^━+$/ })).toEqual(bar)
+  await after.unmount()
+
+  // モデルが全完了の計画を送ると止めた状態が外れ、残りの作業単位が終われば 100% になる
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await notify($, 'b1', 'completed')
+  await clock.advance(1_000)
+  await expectBand($, ['Tasks 7/7', '100%'])
+})
+
+test('T27 起動の記録より先に終わったサブエージェントは、エージェント一覧と突き合わせて完了にする', async ($, on) => {
+  engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await $.turn.complete(agentEnd('a9'))
+  agentRows = [{ id: 'a9', status: 'completed', description: 'scan', type: 'Explore' }]
+  await spawn($, { name: 'a9' })
+  await expectBand($, ['Tasks 3/6'], [' · 1 running in background'])
+  // 一覧で実行中のものは未完了のまま加える
+  agentRows = [{ id: 'a8', status: 'running', description: 'scan', type: 'Explore' }]
+  await spawn($, { name: 'a8' })
+  await expectBand($, ['Tasks 3/7', ' · 1 running in background'])
+})
+
+test('T28 再開したサブエージェントは、前の実行の終了通知の行が描き直されても完了にしない', async ($, on) => {
+  engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await spawn($)
+  await $.turn.complete(agentEnd('a1'))
+  await spawn($, { resume: { agentId: 'a1' } })
+  await notify($, 'a1', 'completed')
+  await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
+  // 再開した実行の終了は turn.complete で拾う
+  await $.turn.complete(agentEnd('a1'))
+  await expectBand($, ['Tasks 3/6'], [' · 1 running in background'])
+})
+
+test('T29 エラーで終わった TaskStop では、作業単位を完了にしない', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await $.tool.call({ tool: 'Bash', command: 'bg' })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1', command: 'fail' } as never)
+  await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
 })
 
 test('T9 計画がなければエンジンに任せる', async ($, on) => {

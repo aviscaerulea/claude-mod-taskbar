@@ -19,6 +19,8 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 - Current step: Shows the job's title and the step in progress above the bar.
 - Plan nudge: When Claude starts working without a step list, asks Claude to make one.
 - Update nudge: When Claude uses tools 5 times with no new step finished, asks it once to update the step list.
+- Background work: Keeps the bar below 100% until every subagent and background shell command finishes.
+  - Counts each one Claude starts as one item.
 - Completion fill-in: When Claude ends its answer without marking the last steps done, treats the remaining steps as done.
 - Automatic cleanup: When every step is done, hides the bar after 20 seconds or as soon as you send the next prompt.
 
@@ -56,7 +58,8 @@ When you ask for a job with two or more steps, Claude makes a step list, the bar
 - The bar is shown only in the terminal, not in the desktop app or IDE extensions
 - The bar changes only when Claude updates its step list, so a new bar may take a moment to appear after you send a prompt
 - When Claude ends its answer midway to ask you a question, the bar still goes to 100%
-- Only the main chat keeps a step list; subagents' work does not appear in the bar
+- Only the main chat keeps a step list; a subagent counts as one item, without its own steps
+- Workflow and Monitor runs are not counted
 - Where another plugin composes the system prompt first, the instruction to make a step list does not reach Claude
   - In that case only the nudges during work ask Claude to make a step list
 - Collapsing with `[-]` at the right end of the bar hides the bar until you open it again
