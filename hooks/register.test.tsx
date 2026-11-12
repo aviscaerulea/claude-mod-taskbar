@@ -596,33 +596,40 @@ test('T31 左端のスピナーは未完了の間だけ回り、中断で止ま�
   await expectBand($, ['✓'], ['⠹'])
 })
 
+type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
+
+/** バーの完了区間と矢印のセルを、左から 1 セルずつ色と組にして返す */
+async function barCells($: Engine) {
+  const ui = await $.ui.mount(BAND)
+  // 「━」と矢印が並ぶのはバーの行全体の Text だけ（色ごとの子は、矢印を「━」の連なりと分けて持つ）
+  const bar = (await ui.find({ type: 'Text', text: /━▶/ })) as Drawn | undefined
+  await ui.unmount()
+  const out: { ch: string; color?: string }[] = []
+  for (const c of bar?.children ?? []) {
+    const t = typeof c === 'object' ? c.children?.[0] : undefined
+    if (typeof c !== 'object' || typeof t !== 'string' || !/^[━▶]+$/.test(t)) continue
+    for (const ch of [...t]) out.push({ ch, color: c.props?.color })
+  }
+  return out
+}
+
+/** 最も明るい色のセルの位置（無ければ -1） */
+const brightest = (cs: { color?: string }[]) => cs.findIndex(c => c.color === '#e4ecfa')
+
+/** 長さ len のバーで、光の帯が 1 コマに進むセル数（1.6 にバーの長さ 1 セルあたり 0.02 を足す） */
+const shineStep = (len: number) => 1.6 + len * 0.02
+
 test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが伸びても帯を飛ばさず、中断では流さない', async ($, on) => {
   const clock = engine(on)
   on('turn.complete', () => ({ text: '' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
-  type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
-  /** バーの完了区間と矢印のセルを、左から 1 セルずつ色と組にして返す */
-  const cells = async () => {
-    const ui = await $.ui.mount(BAND)
-    // 「━」と矢印が並ぶのはバーの行全体の Text だけ（色ごとの子は、矢印を「━」の連なりと分けて持つ）
-    const bar = (await ui.find({ type: 'Text', text: /━▶/ })) as Drawn | undefined
-    await ui.unmount()
-    const out: { ch: string; color?: string }[] = []
-    for (const c of bar?.children ?? []) {
-      const t = typeof c === 'object' ? c.children?.[0] : undefined
-      if (typeof c !== 'object' || typeof t !== 'string' || !/^[━▶]+$/.test(t)) continue
-      for (const ch of [...t]) out.push({ ch, color: c.props?.color })
-    }
-    return out
-  }
-  /** 最も明るい色のセルの位置（無ければ -1） */
-  const brightest = (cs: { color?: string }[]) => cs.findIndex(c => c.color === '#e4ecfa')
+  const cells = () => barCells($)
 
-  // 帯は 1 コマ（125 ミリ秒）に 1.6 セルずつ右へ進む。バーが伸びても位置は飛ばず、矢印の先へ抜けたときだけ左端から出直す
+  // 帯は 1 コマ（125 ミリ秒）に shineStep のセル数ずつ右へ進む。バーが伸びても位置は飛ばず、矢印の先へ抜けたときだけ左端から出直す
   // 計画の開始直後から 120 コマを見る。最初の 1 秒でバーが完了数の位置まで大きく伸びるので、その間も帯が飛ばないことを確かめる
   // 帯が見えないコマ（バーの両端の外にいる間）も数え、見え直したときに次のどちらかであることを確かめる
-  //   前進：最後に見えた位置より右で、見えなかったコマの分を含めて 1.6 セル毎コマの範囲に収まる
+  //   前進：最後に見えた位置より右で、見えなかったコマの分を含めて shineStep の範囲に収まる
   //   出直し：最後に見えた位置が矢印の近くで、見え直した位置が左端の近く（バーの途中から左端へ戻るのは飛び）
   let last = -1
   let gap = 0
@@ -637,7 +644,7 @@ test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが�
     else {
       if (last >= 0) {
         const restarted = at <= 2 && last >= cs.length - 4
-        const forward = at - last >= 1 && at - last <= Math.ceil(1.6 * (gap + 1)) + 1
+        const forward = at - last >= 1 && at - last <= Math.ceil(shineStep(cs.length) * (gap + 1)) + 1
         expect(restarted || forward).toBe(true)
         if (restarted) sweeps++
       }
@@ -674,6 +681,33 @@ test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが�
   }
   expect(first).toBeGreaterThanOrEqual(0)
   expect(first).toBeLessThanOrEqual(2)
+})
+
+test('T33 光の帯は、バーが長いほど速く流れる', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 5 件中 4 件が完了した計画で、バーは 57 セル中の約 46 セルまで進む
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map((st, i) => ({ ...st, status: i < 4 ? 'completed' : 'in_progress' })) } as never)
+  await clock.advance(2_000)
+  // 帯が左端から出直したコマを 3 回まで記録し、2 回目から 3 回目までを 1 往復のコマ数とする
+  const restarts: number[] = []
+  let last = -1
+  let len = 0
+  for (let k = 0; k < 200 && restarts.length < 3; k++) {
+    const cs = await barCells($)
+    const at = brightest(cs)
+    len = cs.length
+    if (at >= 0) {
+      if (last >= 0 && at < last) restarts.push(k)
+      last = at
+    }
+    await clock.advance(125)
+  }
+  expect(restarts.length).toBe(3)
+  const period = (restarts[2] ?? 0) - (restarts[1] ?? 0)
+  // 1 コマ 1.6 セルの一定の速さなら、両端の外の 8 セルを含めて (len + 8) / 1.6 コマかかる。長いバーではそれより明らかに短い
+  expect(period).toBeLessThan((len + 8) / 1.6 - 4)
+  expect(period).toBeGreaterThanOrEqual(Math.floor((len + 8) / shineStep(len)) - 1)
 })
 
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
