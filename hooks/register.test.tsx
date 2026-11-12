@@ -554,7 +554,7 @@ test('T29 エラーで終わった TaskStop では、作業単位を完了にし
   await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
 })
 
-test('T30 残りの区間は、件数の区切りのセルを完了区間と同じ色の大きい点で描く', async ($, on) => {
+test('T30 残りの区間は、件数の区切りのセルを琥珀色の太字の大きい点で描く', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   // 5 件すべて未着手なら、幅 57 セルのバーの 11, 22, 34, 45 セル目が区切り（0 セル目は先端の矢印）
@@ -569,7 +569,7 @@ test('T30 残りの区間は、件数の区切りのセルを完了区間と同�
   const runs = (bar?.children ?? []).filter((c): c is Drawn => typeof c === 'object')
   const marks = runs.filter(c => c.children?.[0] === '•')
   expect(marks.length).toBe(4)
-  expect(marks.every(c => c.props?.color === '#6b8fc6')).toBe(true)
+  expect(marks.every(c => c.props?.color === '#e5a54b' && c.props?.bold === true)).toBe(true)
   expect(runs.filter(c => c.children?.[0] === dots(11)).every(c => c.props?.color === '#3a3a3a')).toBe(true)
 })
 

@@ -39,9 +39,9 @@ const BAR_COLOR = '#6b8fc6'
 const REST_COLOR = '#3a3a3a'
 // 残りの区間のうち、件数の区切りにあたるセルに描く記号で、「·」より大きい点で区切りを示す（利用者の指定）
 const REST_MARK = '•'
-// 区切りの記号の色で、残りの区間と同じ色では見分けにくかったため、完了区間と同じ色にする（利用者の指定）。
-// ターミナルのコントラスト補正が暗い色を引き上げ、残りの「·」と同じ明るさにするので、明るさでなく色相で区別する
-const MARK_COLOR = BAR_COLOR
+// 区切りの記号の色で、完了区間の青と反対側の色相の琥珀色を太字で描く（利用者の指定）。
+// 完了区間と同じ青では目立たなかった。ターミナルのコントラスト補正が明るさの差を縮めるので、明るさでなく色相で区別する
+const MARK_COLOR = '#e5a54b'
 // バーの左端で回すスピナーのコマ（利用者が指定した点字の回転）と、全完了のときに代わりに描く記号
 const SPIN_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // 完了の記号は ✔（U+2714）でなく ✓（U+2713）にする。✔ は絵文字の性質を持ち、2 セル幅で描くターミナルではバーが 1 セルずれるため
@@ -634,7 +634,7 @@ export const register: Register = on => {
               <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
               {tip ? <Text color={BAR_COLOR}>{tip}</Text> : null}
               {restRuns(barW, fillC + tip.length, n).map((run, i) => (
-                <Text key={`rest-${i}`} color={run.mark ? MARK_COLOR : REST_COLOR}>
+                <Text key={`rest-${i}`} color={run.mark ? MARK_COLOR : REST_COLOR} bold={run.mark}>
                   {run.text}
                 </Text>
               ))}
