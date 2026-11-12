@@ -46,6 +46,12 @@ const MARK_COLOR = '#e5a54b'
 const SPIN_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // 完了の記号は ✔（U+2714）でなく ✓（U+2713）にする。✔ は絵文字の性質を持ち、2 セル幅で描くターミナルではバーが 1 セルずれるため
 const SPIN_DONE = '✓'
+// 実行中の区間に流す光の色（暗い順の 4 段。最も暗い段は完了区間と同じ青で、光の外側はこの色になる）
+// filetree mod の光る演出に倣い、帯の中心からの距離で段を選ぶ（利用者の指定）
+const SHINE_TONES = [BAR_COLOR, '#8eaad8', '#b6cbec', '#e4ecfa']
+// 光の帯が 1 コマで進むセル数と、区間の両端の外側で帯を消しておくセル数（filetree mod と同じ値）
+const SHINE_STEP = 1.6
+const SHINE_PAD = 4
 
 // システムプロンプトに足す節（モデルだけが読む）
 const PLAN_PROMPT =
@@ -165,6 +171,33 @@ function restRuns(barW: number, start: number, n: number) {
 function spinChar(plan: Plan, now: number) {
   if (isPlanDone(plan)) return SPIN_DONE
   return SPIN_FRAMES.charAt(Math.floor(elapsedMs(plan, now) / TICK_MS) % SPIN_FRAMES.length)
+}
+
+/**
+ * 完了区間と先端の矢印を、色ごとに描き分ける連続した文字列の並びに分ける
+ * セル 0 から fillC までを「━」、続く tip（空なら無し）を矢印として、どれも BAR_COLOR で描く。矢印は色が同じでも「━」の連なりに混ぜない。
+ * 実行中の手順か未完了の作業単位がある間は、実行中の件の区間（完了数の位置から矢印まで）に光の帯を左から右へ流す。
+ * 帯の位置は経過時間から求める。中断で止めた計画と全完了の計画では流さない（止まった帯は表示の乱れに見えるため）。
+ * 理由：いま進んでいる場所をひと目で分かるようにする（利用者の指定）
+ */
+function fillRuns(plan: Plan, now: number, barW: number, fillC: number, tip: string) {
+  const { n, done } = units(plan)
+  const running = !plan.paused && (plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0)
+  // 実行中の件の区間の始まり（区切りのセルと同じ切り捨ての式）。巻き戻り中に矢印より右になったときは矢印に揃える
+  const from = running && n ? Math.min(fillC, Math.floor((barW * done) / n + 1e-9)) : fillC
+  const cells = [...'━'.repeat(fillC), ...tip]
+  const len = cells.length - from
+  const band = ((Math.floor(elapsedMs(plan, now) / TICK_MS) * SHINE_STEP) % (len + SHINE_PAD * 2)) - SHINE_PAD
+  const runs: { text: string; color: string }[] = []
+  cells.forEach((ch, i) => {
+    // 実行中でなければ、矢印も含めて帯を当てない（from が矢印の位置に来るため、i < from だけでは矢印が残る）
+    const d = !running || i < from ? Infinity : Math.abs(i - from - band)
+    const color = SHINE_TONES[d < 0.8 ? 3 : d < 1.8 ? 2 : d < 2.8 ? 1 : 0] ?? BAR_COLOR
+    const last = runs[runs.length - 1]
+    if (last && last.color === color && i < fillC) last.text += ch
+    else runs.push({ text: ch, color })
+  })
+  return runs
 }
 
 /** ミリ秒を「時:分:秒」（例：0:01:05）にする */
@@ -597,6 +630,7 @@ export const register: Register = on => {
     //   未完了の作業単位があるときだけ、その数を末尾に出す
     // 2 行目：スピナー、完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
     //   スピナーは未完了の間だけ回り、中断で止まり、全完了で ✓ になる（利用者の指定）
+    //   実行中の件の区間には光の帯を流す（fillRuns）
     // 題名の行を上、バーを下に置く（利用者の指定）
     // 件数と百分率は、完了した手順と作業単位だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
     const { n, done } = units(plan)
@@ -631,8 +665,11 @@ export const register: Register = on => {
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>
             <Text color={BAR_COLOR}>{spinChar(plan, now)}</Text>
             <Text>
-              <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
-              {tip ? <Text color={BAR_COLOR}>{tip}</Text> : null}
+              {fillRuns(plan, now, barW, fillC, tip).map((run, i) => (
+                <Text key={`fill-${i}`} color={run.color}>
+                  {run.text}
+                </Text>
+              ))}
               {restRuns(barW, fillC + tip.length, n).map((run, i) => (
                 <Text key={`rest-${i}`} color={run.mark ? MARK_COLOR : REST_COLOR} bold={run.mark}>
                   {run.text}

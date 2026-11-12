@@ -596,6 +596,51 @@ test('T31 左端のスピナーは未完了の間だけ回り、中断で止ま�
   await expectBand($, ['✓'], ['⠹'])
 })
 
+test('T32 実行中の件の区間にだけ光の帯を左から右へ流し、中断では流さない', async ($, on) => {
+  const clock = engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await clock.advance(30_000)
+  type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
+  /** バーの完了区間と矢印のセルを、左から 1 セルずつ色と組にして返す */
+  const cells = async () => {
+    const ui = await $.ui.mount(BAND)
+    // 「━」と矢印が並ぶのはバーの行全体の Text だけ（色ごとの子は、矢印を「━」の連なりと分けて持つ）
+    const bar = (await ui.find({ type: 'Text', text: /━▶/ })) as Drawn | undefined
+    await ui.unmount()
+    const out: { ch: string; color?: string }[] = []
+    for (const c of bar?.children ?? []) {
+      const t = typeof c === 'object' ? c.children?.[0] : undefined
+      if (typeof c !== 'object' || typeof t !== 'string' || !/^[━▶]+$/.test(t)) continue
+      for (const ch of [...t]) out.push({ ch, color: c.props?.color })
+    }
+    return out
+  }
+  /** 最も明るい色のセルの位置（無ければ -1） */
+  const brightest = (cs: { color?: string }[]) => cs.findIndex(c => c.color === '#e4ecfa')
+
+  // 幅 57 セルで 2 件完了なので、実行中の件の区間はセル 22 から矢印まで。完了済みの区間は青のまま
+  const a = await cells()
+  expect(a.length).toBeGreaterThan(22)
+  expect(a.slice(0, 22).every(c => c.color === '#6b8fc6')).toBe(true)
+  expect(brightest(a)).toBeGreaterThanOrEqual(22)
+  // 1 コマ（125 ミリ秒）進めると、帯は右へ動く
+  await clock.advance(125)
+  expect(brightest(await cells())).toBeGreaterThan(brightest(a))
+
+  // 中断で止めた計画では、帯を流さず全体を青で描く
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
+  expect((await cells()).every(c => c.color === '#6b8fc6')).toBe(true)
+
+  // 実行中の手順がない計画では、帯の一周（9 コマ）のどの時点でも、先端の矢印を含めて青で描く
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: st.status === 'in_progress' ? 'pending' : st.status })) } as never)
+  for (let k = 0; k < 9; k++) {
+    expect((await cells()).every(c => c.color === '#6b8fc6')).toBe(true)
+    await clock.advance(125)
+  }
+})
+
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
