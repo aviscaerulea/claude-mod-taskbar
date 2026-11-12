@@ -46,10 +46,10 @@ const MARK_COLOR = '#e5a54b'
 const SPIN_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 // 完了の記号は ✔（U+2714）でなく ✓（U+2713）にする。✔ は絵文字の性質を持ち、2 セル幅で描くターミナルではバーが 1 セルずれるため
 const SPIN_DONE = '✓'
-// 実行中の区間に流す光の色（暗い順の 4 段。最も暗い段は完了区間と同じ青で、光の外側はこの色になる）
+// 完了区間と矢印に流す光の色（暗い順の 4 段。最も暗い段は完了区間と同じ青で、光の外側はこの色になる）
 // filetree mod の光る演出に倣い、帯の中心からの距離で段を選ぶ（利用者の指定）
 const SHINE_TONES = [BAR_COLOR, '#8eaad8', '#b6cbec', '#e4ecfa']
-// 光の帯が 1 コマで進むセル数と、区間の両端の外側で帯を消しておくセル数（filetree mod と同じ値）
+// 光の帯が 1 コマで進むセル数と、バーの両端の外側で帯を消しておくセル数（filetree mod と同じ値）
 const SHINE_STEP = 1.6
 const SHINE_PAD = 4
 
@@ -77,6 +77,8 @@ let staleNudged = false
 
 // 全完了した計画を隠すタイマー（reload で止まるため、モジュール変数で足りる）
 let holdTimer: { cancel: () => void } | null = null
+// 光の帯がいまの往復を始めたコマ（経過時間を TICK_MS で割った値）。reload で 0 に戻っても、次の往復から揃う
+let shineFrom = 0
 // 計画を表示している間だけバーを描き直し続けるタイマー（reload で止まるため、session.start で張り直す）
 let ticker: { cancel: () => void } | null = null
 
@@ -176,22 +178,21 @@ function spinChar(plan: Plan, now: number) {
 /**
  * 完了区間と先端の矢印を、色ごとに描き分ける連続した文字列の並びに分ける
  * セル 0 から fillC までを「━」、続く tip（空なら無し）を矢印として、どれも BAR_COLOR で描く。矢印は色が同じでも「━」の連なりに混ぜない。
- * 実行中の手順か未完了の作業単位がある間は、実行中の件の区間（完了数の位置から矢印まで）に光の帯を左から右へ流す。
- * 帯の位置は経過時間から求める。中断で止めた計画と全完了の計画では流さない（止まった帯は表示の乱れに見えるため）。
- * 理由：いま進んでいる場所をひと目で分かるようにする（利用者の指定）
+ * 実行中の手順か未完了の作業単位がある間は、完了区間と矢印の全体に光の帯を左から右へ流す（利用者の指定）。
+ * 帯は経過時間の 1 コマごとに SHINE_STEP セル進み、矢印の SHINE_PAD セル先へ抜けたら左端の SHINE_PAD セル手前から出直す。
+ * 中断で止めた計画と全完了の計画では流さない（止まった帯は表示の乱れに見えるため）。
+ * 理由：往復の長さを剰余で求めると、バーが伸びて長さが変わったコマで帯が飛ぶため、往復の始まりのコマを shineFrom に持つ
  */
-function fillRuns(plan: Plan, now: number, barW: number, fillC: number, tip: string) {
-  const { n, done } = units(plan)
+function fillRuns(plan: Plan, now: number, fillC: number, tip: string) {
   const running = !plan.paused && (plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0)
-  // 実行中の件の区間の始まり（区切りのセルと同じ切り捨ての式）。巻き戻り中に矢印より右になったときは矢印に揃える
-  const from = running && n ? Math.min(fillC, Math.floor((barW * done) / n + 1e-9)) : fillC
   const cells = [...'━'.repeat(fillC), ...tip]
-  const len = cells.length - from
-  const band = ((Math.floor(elapsedMs(plan, now) / TICK_MS) * SHINE_STEP) % (len + SHINE_PAD * 2)) - SHINE_PAD
+  const frame = Math.floor(elapsedMs(plan, now) / TICK_MS)
+  // 経過時間が巻き戻ったとき（新しい計画）と、帯が矢印の先へ抜けたときに往復を始め直す
+  if (frame < shineFrom || (frame - shineFrom) * SHINE_STEP - SHINE_PAD > cells.length + SHINE_PAD) shineFrom = frame
+  const band = (frame - shineFrom) * SHINE_STEP - SHINE_PAD
   const runs: { text: string; color: string }[] = []
   cells.forEach((ch, i) => {
-    // 実行中でなければ、矢印も含めて帯を当てない（from が矢印の位置に来るため、i < from だけでは矢印が残る）
-    const d = !running || i < from ? Infinity : Math.abs(i - from - band)
+    const d = running ? Math.abs(i - band) : Infinity
     const color = SHINE_TONES[d < 0.8 ? 3 : d < 1.8 ? 2 : d < 2.8 ? 1 : 0] ?? BAR_COLOR
     const last = runs[runs.length - 1]
     if (last && last.color === color && i < fillC) last.text += ch
@@ -630,7 +631,7 @@ export const register: Register = on => {
     //   未完了の作業単位があるときだけ、その数を末尾に出す
     // 2 行目：スピナー、完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
     //   スピナーは未完了の間だけ回り、中断で止まり、全完了で ✓ になる（利用者の指定）
-    //   実行中の件の区間には光の帯を流す（fillRuns）
+    //   完了区間と矢印には、実行中の間だけ光の帯を流す（fillRuns）
     // 題名の行を上、バーを下に置く（利用者の指定）
     // 件数と百分率は、完了した手順と作業単位だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
     const { n, done } = units(plan)
@@ -665,7 +666,7 @@ export const register: Register = on => {
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>
             <Text color={BAR_COLOR}>{spinChar(plan, now)}</Text>
             <Text>
-              {fillRuns(plan, now, barW, fillC, tip).map((run, i) => (
+              {fillRuns(plan, now, fillC, tip).map((run, i) => (
                 <Text key={`fill-${i}`} color={run.color}>
                   {run.text}
                 </Text>

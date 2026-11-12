@@ -596,12 +596,11 @@ test('T31 左端のスピナーは未完了の間だけ回り、中断で止ま�
   await expectBand($, ['✓'], ['⠹'])
 })
 
-test('T32 実行中の件の区間にだけ光の帯を左から右へ流し、中断では流さない', async ($, on) => {
+test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが伸びても帯を飛ばさず、中断では流さない', async ($, on) => {
   const clock = engine(on)
   on('turn.complete', () => ({ text: '' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
-  await clock.advance(30_000)
   type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
   /** バーの完了区間と矢印のセルを、左から 1 セルずつ色と組にして返す */
   const cells = async () => {
@@ -620,20 +619,29 @@ test('T32 実行中の件の区間にだけ光の帯を左から右へ流し、�
   /** 最も明るい色のセルの位置（無ければ -1） */
   const brightest = (cs: { color?: string }[]) => cs.findIndex(c => c.color === '#e4ecfa')
 
-  // 幅 57 セルで 2 件完了なので、実行中の件の区間はセル 22 から矢印まで。完了済みの区間は青のまま
-  const a = await cells()
-  expect(a.length).toBeGreaterThan(22)
-  expect(a.slice(0, 22).every(c => c.color === '#6b8fc6')).toBe(true)
-  expect(brightest(a)).toBeGreaterThanOrEqual(22)
-  // 1 コマ（125 ミリ秒）進めると、帯は右へ動く
-  await clock.advance(125)
-  expect(brightest(await cells())).toBeGreaterThan(brightest(a))
+  // 帯は 1 コマ（125 ミリ秒）に 1.6 セルずつ右へ進む。バーが伸びても位置は飛ばず、矢印の先へ抜けたときだけ左端から出直す
+  // 計画の開始直後から 120 コマを見る。最初の 1 秒でバーが完了数の位置まで大きく伸びるので、その間も帯が飛ばないことを確かめる
+  // あわせて、完了済みの区間（セル 22 より左）にも光が届くことを確かめる
+  let prev = -1
+  let reachedDone = false
+  for (let k = 0; k < 120; k++) {
+    const cs = await cells()
+    const at = brightest(cs)
+    if (at >= 0 && at < 22) reachedDone = true
+    if (prev >= 0 && at >= 0) {
+      const restarted = at < prev && prev >= cs.length - 3
+      expect(restarted || (at - prev >= 1 && at - prev <= 2)).toBe(true)
+    }
+    prev = at
+    await clock.advance(125)
+  }
+  expect(reachedDone).toBe(true)
 
   // 中断で止めた計画では、帯を流さず全体を青で描く
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
   expect((await cells()).every(c => c.color === '#6b8fc6')).toBe(true)
 
-  // 実行中の手順がない計画では、帯の一周（9 コマ）のどの時点でも、先端の矢印を含めて青で描く
+  // 実行中の手順がない計画では、9 コマ続けて見ても、先端の矢印を含めて常に青で描く
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: st.status === 'in_progress' ? 'pending' : st.status })) } as never)
   for (let k = 0; k < 9; k++) {
     expect((await cells()).every(c => c.color === '#6b8fc6')).toBe(true)

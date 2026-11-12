@@ -15,7 +15,7 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 
 - Progress bar: When Claude updates its step list, shows the share of finished steps as a bar with the count and percentage.
 - Smooth motion: Extends the running step's part of the bar little by little over time, and moves on to the next position in about a second when the step is done.
-- Moving shine: Sweeps a light from left to right across the running step's part of the bar, and drops it when the work is interrupted.
+- Moving shine: While work is running, sweeps a light from left to right across the whole filled part of the bar, and drops it when the work is interrupted.
 - Spinner: Spins at the left end of the bar while work remains, stops when the work is interrupted, and turns into `✓` when every step is done.
 - Elapsed time: Shows the time since the plan started at the right end of the bar, and stops it when every step is done or the work is interrupted.
 - Current step: Shows the job's title and the step in progress above the bar.
