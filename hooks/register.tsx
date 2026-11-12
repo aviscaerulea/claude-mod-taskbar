@@ -21,7 +21,8 @@ const CREEP_HALF_MS = 30_000
 // 完了数か実行中の手順が変わったとき、前の位置から新しい位置まで何ミリ秒で動かすか
 const CATCH_MS = 1_000
 // バーを描き直す間隔（ミリ秒）。エンジンは描き直しを 1 秒 10 回までにまとめるので、それより粗くする
-const TICK_MS = 250
+// スピナーもこの間隔で 1 コマ進むため、回転が滑らかに見える 125 にする（1 回転は 1.25 秒）
+const TICK_MS = 125
 // bodyColumns が取れないときの幅（セル数）
 const BAR_FALLBACK = 30
 // plan ツールが受け付ける手順の状態
@@ -41,6 +42,10 @@ const REST_MARK = '•'
 // 区切りの記号の色で、残りの区間と同じ色では見分けにくかったため、完了区間と同じ色にする（利用者の指定）。
 // ターミナルのコントラスト補正が暗い色を引き上げ、残りの「·」と同じ明るさにするので、明るさでなく色相で区別する
 const MARK_COLOR = BAR_COLOR
+// バーの左端で回すスピナーのコマ（利用者が指定した点字の回転）と、全完了のときに代わりに描く記号
+const SPIN_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+// 完了の記号は ✔（U+2714）でなく ✓（U+2713）にする。✔ は絵文字の性質を持ち、2 セル幅で描くターミナルではバーが 1 セルずれるため
+const SPIN_DONE = '✓'
 
 // システムプロンプトに足す節（モデルだけが読む）
 const PLAN_PROMPT =
@@ -152,6 +157,16 @@ function restRuns(barW: number, start: number, n: number) {
   return runs
 }
 
+/**
+ * 時刻 now にバーの左端へ描くスピナーの 1 文字を求める
+ * 全完了の計画では SPIN_DONE を返す。それ以外は、経過時間が TICK_MS 進むごとに SPIN_FRAMES を 1 コマ進める。
+ * 理由：経過時間は中断で止まるので、止めた計画では止めた時点のコマがそのまま残り、状態を別に持たずに済む（止まったコマは利用者の指定）
+ */
+function spinChar(plan: Plan, now: number) {
+  if (isPlanDone(plan)) return SPIN_DONE
+  return SPIN_FRAMES.charAt(Math.floor(elapsedMs(plan, now) / TICK_MS) % SPIN_FRAMES.length)
+}
+
 /** ミリ秒を「時:分:秒」（例：0:01:05）にする */
 function clockText(ms: number) {
   const s = Math.floor(ms / 1000)
@@ -171,7 +186,7 @@ function warn($: EngineInterface, err: unknown) {
 
 /**
  * バーを描き直すタイマーを、計画を表示しているかに合わせて張るか止める
- * 表示中はバーが時間で伸びるため、描き直しを TICK_MS ごとに求め続ける。
+ * 表示中はバーが時間で伸び、スピナーが回るため、描き直しを TICK_MS ごとに求め続ける。
  */
 function syncTicker($: EngineInterface, shown: boolean) {
   if (shown) {
@@ -580,7 +595,8 @@ export const register: Register = on => {
     // 1 行目：「題名：いまの手順 · N running in background」（全角の幅も画面側の truncate-end が数えて切る）
     //   いまの手順は、実行中の手順、次の手順、All steps done の順に選ぶ。手順が全完了で作業単位が残るときは出さない。
     //   未完了の作業単位があるときだけ、その数を末尾に出す
-    // 2 行目：完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
+    // 2 行目：スピナー、完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
+    //   スピナーは未完了の間だけ回り、中断で止まり、全完了で ✓ になる（利用者の指定）
     // 題名の行を上、バーを下に置く（利用者の指定）
     // 件数と百分率は、完了した手順と作業単位だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
     const { n, done } = units(plan)
@@ -594,8 +610,8 @@ export const register: Register = on => {
     // 右端には計画の開始からの経過時間を出す（全完了と中断で止まる。利用者の指定）
     const now = await $.clock.now()
     const time = clockText(elapsedMs(plan, now))
-    // バーは件数、百分率、経過時間と、その間の空白 3 つを除いた残りの幅いっぱいに描く
-    const barW = Math.max(6, w - label.length - pct.length - time.length - 3)
+    // バーはスピナー 1 セル、件数、百分率、経過時間と、その間の空白 4 つを除いた残りの幅いっぱいに描く
+    const barW = Math.max(6, w - label.length - pct.length - time.length - 5)
     // 切り捨てで数え、実行中の区間が四捨五入で終端まで埋まって完了に見えるのを防ぐ（小数の誤差で 1 セル欠けないよう微小な値を足す）
     const fillC = Math.min(barW, Math.max(0, Math.floor(barW * shownRatio(plan, now) + 1e-9)))
     // 100% に届くまでは、完了区間の先に、棒より大きい矢印の先端を 1 セル描く（利用者の指定）
@@ -613,6 +629,7 @@ export const register: Register = on => {
             </Text>
           </Box>
           <Box key="plan-row" flexDirection="row" gap={1} width={w}>
+            <Text color={BAR_COLOR}>{spinChar(plan, now)}</Text>
             <Text>
               <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
               {tip ? <Text color={BAR_COLOR}>{tip}</Text> : null}

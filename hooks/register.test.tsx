@@ -274,25 +274,26 @@ test('T16 バーは実行中の区間を時間で伸ばし、完了で次の位�
     await ui.unmount()
   }
 
-  // 幅 59 セルのバーで、1 件目の区間（20%）の半分まで 30 秒で伸びる（5.9 セルを切り捨てて 5）
+  // 幅 57 セルのバーで、1 件目の区間（20%）の半分まで 30 秒で伸びる（5.7 セルを切り捨てて 5）
   await clock.advance(30_000)
   await expectFill(5)
   // 同じ状態の送り直しでは位置を変えない
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
   await expectFill(5)
 
-  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 58 セル）
+  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 56 セル）
   const second = steps.map((st, i) => ({ ...st, status: i === 0 ? 'completed' : i === 1 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: second } as never)
   await expectFill(5)
   await clock.advance(500)
   await expectFill(8)
 
-  // 1 件だけの計画を長く実行しても、区間の終端（全幅 59 セル）までは埋めず、先端の矢印を残す
+  // 1 件だけの計画を長く実行しても、区間の終端（全幅 57 セル）までは埋めず、先端の矢印を残す
   await $.tool.call({ tool: PLAN_TOOL, steps: [{ text: 'only', status: 'in_progress' }] } as never)
   await clock.advance(600_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(58) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(56) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(57) })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: '▶' })).toBeDefined()
   await ui.unmount()
 })
@@ -318,7 +319,7 @@ test('T17 ターンが中断で終わると、バーをその位置で止め、�
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
   await expectFill(5)
   await clock.advance(60_000)
-  await expectFill(10)
+  await expectFill(9)
 })
 
 test('T18 止めたバーより手前から始まる計画が届くと、バーをその位置へ戻して伸ばす', async ($, on) => {
@@ -330,7 +331,7 @@ test('T18 止めたバーより手前から始まる計画が届くと、バー�
   await clock.advance(30_000)
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
 
-  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 59 セル）
+  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 57 セル）
   const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
   await clock.advance(30_000)
@@ -556,7 +557,7 @@ test('T29 エラーで終わった TaskStop では、作業単位を完了にし
 test('T30 残りの区間は、件数の区切りのセルを完了区間と同じ色の大きい点で描く', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  // 5 件すべて未着手なら、幅 59 セルのバーの 11, 23, 35, 47 セル目が区切り（0 セル目は先端の矢印）
+  // 5 件すべて未着手なら、幅 57 セルのバーの 11, 22, 34, 45 セル目が区切り（0 セル目は先端の矢印）
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'pending' })) } as never)
   type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
   const ui = await $.ui.mount(BAND)
@@ -564,12 +565,35 @@ test('T30 残りの区間は、件数の区切りのセルを完了区間と同�
   const bar = (await ui.find({ type: 'Text', text: '•' })) as Drawn | undefined
   await ui.unmount()
   const dots = (k: number) => '·'.repeat(k)
-  expect(bar?.text).toBe(`▶${dots(10)}•${dots(11)}•${dots(11)}•${dots(11)}•${dots(11)}`)
+  expect(bar?.text).toBe(`▶${dots(10)}•${dots(10)}•${dots(11)}•${dots(10)}•${dots(11)}`)
   const runs = (bar?.children ?? []).filter((c): c is Drawn => typeof c === 'object')
   const marks = runs.filter(c => c.children?.[0] === '•')
   expect(marks.length).toBe(4)
   expect(marks.every(c => c.props?.color === '#6b8fc6')).toBe(true)
   expect(runs.filter(c => c.children?.[0] === dots(11)).every(c => c.props?.color === '#3a3a3a')).toBe(true)
+})
+
+test('T31 左端のスピナーは未完了の間だけ回り、中断で止まり、全完了で ✓ になる', async ($, on) => {
+  const clock = engine(on)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  // 125 ミリ秒ごとに 1 コマ進み、10 コマで一巡する
+  await expectBand($, ['⠋'])
+  await clock.advance(125)
+  await expectBand($, ['⠙'], ['⠋'])
+  await clock.advance(125 * 9)
+  await expectBand($, ['⠋'])
+
+  // 中断で止めた間は、止めた時点のコマのまま動かない
+  await clock.advance(250)
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
+  await clock.advance(60_000 + 125)
+  await expectBand($, ['⠹'])
+
+  // 全完了では ✓ に替わる
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await expectBand($, ['✓'], ['⠹'])
 })
 
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
