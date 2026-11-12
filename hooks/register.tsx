@@ -52,6 +52,8 @@ const SHINE_TONES = [BAR_COLOR, '#8eaad8', '#b6cbec', '#e4ecfa']
 // 光の帯が 1 コマで進むセル数と、バーの両端の外側で帯を消しておくセル数（filetree mod と同じ値）
 const SHINE_STEP = 1.6
 const SHINE_PAD = 4
+// 描画の順序が入れ替わり、少し前の時刻の描画が後から届いたときに、新しい計画とはみなさない巻き戻りのコマ数
+const SHINE_LAG = 2
 
 // システムプロンプトに足す節（モデルだけが読む）
 const PLAN_PROMPT =
@@ -182,14 +184,16 @@ function spinChar(plan: Plan, now: number) {
  * 帯は経過時間の 1 コマごとに SHINE_STEP セル進み、矢印の SHINE_PAD セル先へ抜けたら左端の SHINE_PAD セル手前から出直す。
  * 中断で止めた計画と全完了の計画では流さない（止まった帯は表示の乱れに見えるため）。
  * 理由：往復の長さを剰余で求めると、バーが伸びて長さが変わったコマで帯が飛ぶため、往復の始まりのコマを shineFrom に持つ
+ * 注意：描画は経過時間を読む前に待ち合わせるので、前後して届くことがある。SHINE_LAG コマまでの巻き戻りでは往復を始め直さない
  */
 function fillRuns(plan: Plan, now: number, fillC: number, tip: string) {
   const running = !plan.paused && (plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0)
   const cells = [...'━'.repeat(fillC), ...tip]
   const frame = Math.floor(elapsedMs(plan, now) / TICK_MS)
-  // 経過時間が巻き戻ったとき（新しい計画）と、帯が矢印の先へ抜けたときに往復を始め直す
-  if (frame < shineFrom || (frame - shineFrom) * SHINE_STEP - SHINE_PAD > cells.length + SHINE_PAD) shineFrom = frame
-  const band = (frame - shineFrom) * SHINE_STEP - SHINE_PAD
+  // 経過時間が SHINE_LAG コマより大きく巻き戻ったとき（新しい計画）と、帯が矢印の先へ抜けたときに往復を始め直す
+  if (frame < shineFrom - SHINE_LAG || (frame - shineFrom) * SHINE_STEP - SHINE_PAD > cells.length + SHINE_PAD) shineFrom = frame
+  // 往復の始まりより前の時刻の描画では、帯を始まりの位置（左端の外）に置く
+  const band = Math.max(0, frame - shineFrom) * SHINE_STEP - SHINE_PAD
   const runs: { text: string; color: string }[] = []
   cells.forEach((ch, i) => {
     const d = running ? Math.abs(i - band) : Infinity

@@ -621,20 +621,35 @@ test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが�
 
   // 帯は 1 コマ（125 ミリ秒）に 1.6 セルずつ右へ進む。バーが伸びても位置は飛ばず、矢印の先へ抜けたときだけ左端から出直す
   // 計画の開始直後から 120 コマを見る。最初の 1 秒でバーが完了数の位置まで大きく伸びるので、その間も帯が飛ばないことを確かめる
-  // あわせて、完了済みの区間（セル 22 より左）にも光が届くことを確かめる
-  let prev = -1
+  // 帯が見えないコマ（バーの両端の外にいる間）も数え、見え直したときに次のどちらかであることを確かめる
+  //   前進：最後に見えた位置より右で、見えなかったコマの分を含めて 1.6 セル毎コマの範囲に収まる
+  //   出直し：最後に見えた位置が矢印の近くで、見え直した位置が左端の近く（バーの途中から左端へ戻るのは飛び）
+  let last = -1
+  let gap = 0
+  let sweeps = 0
   let reachedDone = false
   for (let k = 0; k < 120; k++) {
     const cs = await cells()
     const at = brightest(cs)
-    if (at >= 0 && at < 22) reachedDone = true
-    if (prev >= 0 && at >= 0) {
-      const restarted = at < prev && prev >= cs.length - 3
-      expect(restarted || (at - prev >= 1 && at - prev <= 2)).toBe(true)
+    if (at < 0) {
+      gap++
     }
-    prev = at
+    else {
+      if (last >= 0) {
+        const restarted = at <= 2 && last >= cs.length - 4
+        const forward = at - last >= 1 && at - last <= Math.ceil(1.6 * (gap + 1)) + 1
+        expect(restarted || forward).toBe(true)
+        if (restarted) sweeps++
+      }
+      // 2 往復目からは、バーが完了数の位置（セル 22）より長いので、完了済みの区間を光が通ることを確かめられる
+      // 出直した直後に光る左端（セル 0〜2）は数えず、完了済みの区間の途中（セル 3〜21）を光が通ったときだけ数える
+      if (sweeps > 0 && at >= 3 && at < 22) reachedDone = true
+      last = at
+      gap = 0
+    }
     await clock.advance(125)
   }
+  expect(sweeps).toBeGreaterThanOrEqual(2)
   expect(reachedDone).toBe(true)
 
   // 中断で止めた計画では、帯を流さず全体を青で描く
@@ -647,6 +662,18 @@ test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが�
     expect((await cells()).every(c => c.color === '#6b8fc6')).toBe(true)
     await clock.advance(125)
   }
+
+  // 計画が消えた後の新しい計画では、経過時間が 0 から数え直すので、帯は左端から出直す
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await clock.advance(20_000)
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  let first = -1
+  for (let k = 0; k < 12 && first < 0; k++) {
+    await clock.advance(125)
+    first = brightest(await cells())
+  }
+  expect(first).toBeGreaterThanOrEqual(0)
+  expect(first).toBeLessThanOrEqual(2)
 })
 
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
