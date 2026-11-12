@@ -80,6 +80,9 @@ let sinceDone = 0
 let lastDone = -1
 let staleNudged = false
 
+// メインの会話のターンが動いている間 true（turn.start で立て、turn.complete で下ろす）
+// reload で false に戻るが、続くターンの turn.complete で完了を判定し直すので、表示は終わりに揃う
+let mainTurn = false
 // 全完了した計画を隠すタイマー（reload で止まるため、モジュール変数で足りる）
 let holdTimer: { cancel: () => void } | null = null
 // 光の帯の位置（セル）と、その位置まで進めたコマ（経過時間を TICK_MS で割った値）
@@ -116,6 +119,14 @@ function isPlanDone(plan: Plan) {
   const u = units(plan)
   return u.n > 0 && u.done === u.n
 }
+
+/**
+ * 計画が完了したか（手順と作業単位がすべて完了し、メインのターンも終わった）
+ * finished の無い計画（reload 前の版の値）は、すべて完了していれば完了とみなす。
+ */
+const isFinished = (plan: Plan) => isPlanDone(plan) && plan.finished !== false
+/** すべて完了したが、メインのターンが続いていて、Claude がまとめを書いている間か */
+const isFinishing = (plan: Plan) => isPlanDone(plan) && !isFinished(plan)
 
 /** 完了数、件数、実行中の手順の位置、未完了の作業単位の数をまとめた値（これが変わったときだけバーの動きの起点を置き直す） */
 function progressKey(plan: Plan) {
@@ -173,26 +184,26 @@ function restRuns(barW: number, start: number, n: number) {
 
 /**
  * 時刻 now にバーの左端へ描くスピナーの 1 文字を求める
- * 全完了の計画では SPIN_DONE を返す。それ以外は、経過時間が TICK_MS 進むごとに SPIN_FRAMES を 1 コマ進める。
+ * 完了した計画では SPIN_DONE を返す。それ以外は（まとめ中も含めて）、経過時間が TICK_MS 進むごとに SPIN_FRAMES を 1 コマ進める。
  * 理由：経過時間は中断で止まるので、止めた計画では止めた時点のコマがそのまま残り、状態を別に持たずに済む（止まったコマは利用者の指定）
  */
 function spinChar(plan: Plan, now: number) {
-  if (isPlanDone(plan)) return SPIN_DONE
+  if (isFinished(plan)) return SPIN_DONE
   return SPIN_FRAMES.charAt(Math.floor(elapsedMs(plan, now) / TICK_MS) % SPIN_FRAMES.length)
 }
 
 /**
  * 完了区間と先端の矢印を、色ごとに描き分ける連続した文字列の並びに分ける
  * セル 0 から fillC までを「━」、続く tip（空なら無し）を矢印として、どれも BAR_COLOR で描く。矢印は色が同じでも「━」の連なりに混ぜない。
- * 実行中の手順か未完了の作業単位がある間は、完了区間と矢印の全体に光の帯を左から右へ流す（利用者の指定）。
+ * 実行中の手順か未完了の作業単位がある間と、まとめ中の間は、完了区間と矢印の全体に光の帯を左から右へ流す（利用者の指定）。
  * 帯は経過時間の 1 コマごとに、SHINE_STEP にバーの長さに応じた SHINE_ACCEL の分を足したセル数だけ進む。
  * 矢印の SHINE_PAD セル先へ抜けたら、左端の SHINE_PAD セル手前から出直す。
- * 中断で止めた計画と全完了の計画では流さない（止まった帯は表示の乱れに見えるため）。
+ * 中断で止めた計画と完了した計画では流さない（止まった帯は表示の乱れに見えるため）。
  * 理由：帯の位置を経過時間から一度に求めると、バーが伸びて往復の長さや速さが変わったコマで帯が飛ぶため、位置を shine に持って前のコマから進める
  * 注意：描画は経過時間を読む前に待ち合わせるので、前後して届くことがある。SHINE_LAG コマまでの巻き戻りでは帯を動かさない
  */
 function fillRuns(plan: Plan, now: number, fillC: number, tip: string) {
-  const running = !plan.paused && (plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0)
+  const running = !plan.paused && (plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0 || isFinishing(plan))
   const cells = [...'━'.repeat(fillC), ...tip]
   const frame = Math.floor(elapsedMs(plan, now) / TICK_MS)
   // 経過時間が SHINE_LAG コマより大きく巻き戻ったとき（新しい計画）は、左端の外から出直す
@@ -264,13 +275,15 @@ type PlanChange = { title?: string; steps: PlanStep[]; jobs: Job[]; keepPause?: 
 /**
  * 計画を、古い計画から作った内容で丸ごと置き換える
  * 内容は make が update の中で古い計画から作る。サブエージェントの終了と手順の送り直しが続けて届いても、先の更新を古い値で上書きしないため。
- * 手順と作業単位がすべて完了なら DONE_HOLD_MS 後に表示を消す。題名がなければ、作業途中の前の計画からだけ題名を引き継ぎ、手順もなければ空にする。
+ * 手順と作業単位がすべて完了し、メインのターンも動いていなければ完了（finished）とし、DONE_HOLD_MS 後に表示を消す。
+ * すべて完了してもメインのターンが動いていれば、まとめ中として経過時間を数え続け、完了は turn.complete に任せる（利用者の指定）。
+ * 題名がなければ、作業途中の前の計画からだけ題名を引き継ぎ、手順もなければ空にする。
  * 完了数か実行中が変わったときは、いまバーが描いている割合を起点にして新しい位置へ動かす。
  * 同じ状態の送り直しでは起点を保ち、バーを巻き戻さない。止めていたバーは、止めた位置から動かし直す。前の計画が隠れていれば 0 から動かす。
- * 経過時間は、表示中の計画からはそこまでの値を引き継ぎ、隠れた後の計画では 0 から数える。全完了の計画では数えるのを止める。
+ * 経過時間は、表示中の計画からはそこまでの値を引き継ぎ、隠れた後の計画では 0 から数える。完了した計画では数えるのを止める。
  * keepPause の更新（作業単位の追加、完了、捨て）では、中断で止めた計画の paused、バーの位置、経過時間をそのまま保ち、件数だけを変える。
  * 中断した計画は、次に計画が届くまで止めたままにするため（利用者の判断で、バックグラウンド作業が動き続けていても同じ）。
- * ただし手順と作業単位がすべて完了になったときは、止めたままにせず全完了として扱い、100% にして DONE_HOLD_MS 後に消す。
+ * ただし手順と作業単位がすべて完了になったときは、止めたままにしない。メインのターンが動いていなければ完了として 100% にして DONE_HOLD_MS 後に消し、動いていればまとめ中にする。
  */
 async function applyPlan($: EngineInterface, make: (old: Plan | null) => PlanChange) {
   const now = await $.clock.now()
@@ -278,6 +291,7 @@ async function applyPlan($: EngineInterface, make: (old: Plan | null) => PlanCha
   await update($, planAtom, old => {
     const c = make(old)
     const done = isPlanDone({ title: '', steps: c.steps, jobs: c.jobs, shown: true })
+    const finished = done && !mainTurn
     if (c.keepPause && old?.shown && old.paused && !done) {
       made = { ...old, steps: c.steps, jobs: c.jobs }
       return made
@@ -291,7 +305,8 @@ async function applyPlan($: EngineInterface, make: (old: Plan | null) => PlanCha
       from: 0,
       at: now,
       spent: old?.shown ? elapsedMs(old, now) : 0,
-      startedAt: done ? undefined : now,
+      startedAt: finished ? undefined : now,
+      finished,
     }
     made = old?.shown && !old.paused && progressKey(old) === progressKey(next)
       ? { ...next, from: old.from, at: old.at }
@@ -303,7 +318,7 @@ async function applyPlan($: EngineInterface, make: (old: Plan | null) => PlanCha
   holdTimer?.cancel()
   holdTimer = null
   syncTicker($, !!shown?.shown && !shown.paused)
-  if (shown && isPlanDone(shown)) {
+  if (shown && isFinished(shown)) {
     holdTimer = $.clock.after(DONE_HOLD_MS, () => {
       holdTimer = null
       void hidePlan($).catch(err => warn($, err))
@@ -470,11 +485,11 @@ export const register: Register = on => {
         isDeferred: false,
       })
       .catch(err => warn($, err))
-    // reload で保留タイマーと描き直しタイマーが消えるため、全完了の計画はここで隠し、作業途中の計画は描き直しを張り直す。
+    // reload で保留タイマーと描き直しタイマーが消えるため、完了した計画はここで隠し、作業途中とまとめ中の計画は描き直しを張り直す。
     // 表示の失敗でセッションの開始を止めない
     try {
       const plan = await read($, planAtom)
-      if (plan?.shown && isPlanDone(plan)) await hidePlan($)
+      if (plan?.shown && isFinished(plan)) await hidePlan($)
       else syncTicker($, !!plan?.shown && !plan.paused)
     }
     catch (err) {
@@ -491,14 +506,15 @@ export const register: Register = on => {
   })
 
   // 利用者が送ったプロンプトは新しい作業として、催促を数え直す（通知やスケジュール実行では数え続ける）
-  // 全完了の計画は、20 秒の保留を待たずにここで隠す。モデルが新しい計画を送るまで前回の表示が残って見えるため（利用者の判断）。
+  // 完了した計画は、20 秒の保留を待たずにここで隠す。モデルが新しい計画を送るまで前回の表示が残って見えるため（利用者の判断）。
+  // まとめ中の計画は、作業中に送った追加のプロンプトでは隠さない（ターンが続いているため）。
   // 作業途中の計画は、続きの指示かもしれないので残す。ただし完了済みの作業単位は前の依頼のものとして捨て、未完了のものは残す。表示の失敗で送信を止めない
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
       resetNudge()
       try {
         const plan = await read($, planAtom)
-        if (plan?.shown && isPlanDone(plan)) await hidePlan($)
+        if (plan?.shown && isFinished(plan)) await hidePlan($)
         else if (plan?.shown && jobsOf(plan).some(j => j.done)) {
           await applyPlan($, old => ({ title: old?.title, steps: old?.steps ?? [], jobs: jobsOf(old).filter(j => !j.done), keepPause: true }))
         }
@@ -532,6 +548,12 @@ export const register: Register = on => {
     return r
   })
 
+  // メインの会話のターンが動いている間を記録する（すべて完了しても、ターンが終わるまでは 100% にしないため）
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) mainTurn = true
+    return next(e)
+  })
+
   // サブエージェントのターンが終わったとき、その作業単位を完了にする（1 回の実行が 1 ターン。実機で、同じ agentId で届くことを確認済み）
   // 利用者が画面から止めたときも、reason が aborted の turn.complete が同じ agentId で届く（実機で確認済み）ので、終わり方は問わない。
   // その id の作業単位がまだ無いとき（起動直後に終わった場合）は何もせず、agent.spawn 側の突き合わせに任せる。
@@ -540,15 +562,22 @@ export const register: Register = on => {
   // 未完了の作業単位が残る間は、手順が全完了でも計画は終わらず、バーは 100% にならない（作業単位の終了で完了する）。
   // 質問のために途中で止まった場合も手順は全完了になるが、次のターンでモデルが計画を送り直せば、新しい計画に置き換わる。
   // 中断、拒否、エラーで終わったときは、作業が止まったのでバーと経過時間をその位置で止め、描き直しも止める（利用者の判断）
+  // すべて完了してまとめ中だった計画は、終わり方を問わず、ここで完了にする（Claude の作業が終わるまで 100% にしない。利用者の指定）
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId !== undefined) {
       await finishJob($, e.agentId).catch(err => warn($, err))
       return r
     }
+    mainTurn = false
     try {
       const plan = await read($, planAtom)
-      if (!plan?.shown || isAllDone(plan.steps)) return r
+      if (!plan?.shown) return r
+      if (isFinishing(plan)) {
+        await applyPlan($, old => ({ title: old?.title, steps: old?.steps ?? [], jobs: jobsOf(old) }))
+        return r
+      }
+      if (isAllDone(plan.steps)) return r
       if (e.reason === 'answer') {
         await applyPlan($, old => ({
           title: old?.title,
@@ -642,28 +671,30 @@ export const register: Register = on => {
     const w = e.props.bodyColumns > 0 ? Math.floor(e.props.bodyColumns) : BAR_FALLBACK
 
     // 1 行目：「題名：いまの手順 · N running in background」（全角の幅も画面側の truncate-end が数えて切る）
-    //   いまの手順は、実行中の手順、次の手順、All steps done の順に選ぶ。手順が全完了で作業単位が残るときは出さない。
+    //   いまの手順は、実行中の手順、次の手順、Finishing up（まとめ中）、All steps done の順に選ぶ。手順が全完了で作業単位が残るときは出さない。
     //   未完了の作業単位があるときだけ、その数を末尾に出す
     // 2 行目：スピナー、完了の区間、先端の矢印、残り、件数、百分率、経過時間（実行中の手順は 1 行目で示し、バーでは区別しない）
-    //   スピナーは未完了の間だけ回り、中断で止まり、全完了で ✓ になる（利用者の指定）
+    //   スピナーは完了するまで回り、中断で止まり、完了で ✓ になる（利用者の指定）
+    //   まとめ中は、バーを終端の 1 セル手前で止め、百分率を 99% にする（利用者の指定）
     //   完了区間と矢印には、実行中の間だけ光の帯を流す（fillRuns）
     // 題名の行を上、バーを下に置く（利用者の指定）
     // 件数と百分率は、完了した手順と作業単位だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
     const { n, done } = units(plan)
     const bg = runningJobs(plan)
-    const pct = `${Math.round((done / n) * 100)}%`
+    const finishing = isFinishing(plan)
+    const pct = `${finishing ? 99 : Math.round((done / n) * 100)}%`
     const label = `Tasks ${done}/${n}`
     const current = plan.steps.find(st => st.status === 'in_progress')
     const nextUp = plan.steps.find(st => st.status === 'pending')
-    const line = current ? current.text : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
+    const line = current ? current.text : finishing ? 'Finishing up' : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
     const title = plan.title || 'Background'
-    // 右端には計画の開始からの経過時間を出す（全完了と中断で止まる。利用者の指定）
+    // 右端には計画の開始からの経過時間を出す（完了と中断で止まる。利用者の指定）
     const now = await $.clock.now()
     const time = clockText(elapsedMs(plan, now))
     // バーはスピナー 1 セル、件数、百分率、経過時間と、その間の空白 4 つを除いた残りの幅いっぱいに描く
     const barW = Math.max(6, w - label.length - pct.length - time.length - 5)
     // 切り捨てで数え、実行中の区間が四捨五入で終端まで埋まって完了に見えるのを防ぐ（小数の誤差で 1 セル欠けないよう微小な値を足す）
-    const fillC = Math.min(barW, Math.max(0, Math.floor(barW * shownRatio(plan, now) + 1e-9)))
+    const fillC = Math.min(finishing ? barW - 1 : barW, Math.max(0, Math.floor(barW * shownRatio(plan, now) + 1e-9)))
     // 100% に届くまでは、完了区間の先に、棒より大きい矢印の先端を 1 セル描く（利用者の指定）
     const tip = fillC < barW ? '▶' : ''
 

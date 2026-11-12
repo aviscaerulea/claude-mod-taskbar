@@ -16,7 +16,7 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 - Progress bar: When Claude updates its step list, shows the share of finished steps as a bar with the count and percentage.
 - Smooth motion: Extends the running step's part of the bar little by little over time, and moves on to the next position in about a second when the step is done.
 - Moving shine: While work is running, sweeps a light from left to right across the whole filled part of the bar, a little faster on a longer bar, and drops it when the work is interrupted.
-- Spinner: Spins at the left end of the bar while work remains, stops when the work is interrupted, and turns into `✓` when every step is done.
+- Spinner: Spins at the left end of the bar until Claude finishes its work, stops when the work is interrupted, and turns into `✓` when Claude is done.
 - Elapsed time: Shows the time since the plan started at the right end of the bar, and stops it when every step is done or the work is interrupted.
 - Current step: Shows the job's title and the step in progress above the bar.
 - Plan nudge: When Claude starts working without a step list, asks Claude to make one.
@@ -24,7 +24,8 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 - Background work: Keeps the bar below 100% until every subagent and background shell command finishes.
   - Counts each one Claude starts as one item.
 - Completion fill-in: When Claude ends its answer without marking the last steps done, treats the remaining steps as done.
-- Automatic cleanup: When every step is done, hides the bar after 20 seconds or as soon as you send the next prompt.
+- Finishing up: Even when every step is done, holds the bar at 99% and shows `Finishing up` until Claude finishes writing its answer.
+- Automatic cleanup: When every step is done and Claude has finished its answer, hides the bar after 20 seconds or as soon as you send the next prompt.
 
 ## Installation
 

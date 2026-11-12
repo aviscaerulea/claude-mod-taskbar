@@ -710,6 +710,50 @@ test('T33 光の帯は、バーが長いほど速く流れる', async ($, on) =>
   expect(period).toBeGreaterThanOrEqual(Math.floor((len + 8) / shineStep(len)) - 1)
 })
 
+/** メインの会話でターンが終わったときの入力（reason が answer なら回答、aborted なら中断） */
+const mainEnd = (reason: 'answer' | 'aborted') => ({ answer: '', durationMs: 1, turnId: 't1', isAborted: reason === 'aborted', reason }) as never
+
+test('T34 すべて完了しても、メインのターンが終わるまでは 99% のまとめ中で待ち、終わったら 100% にする', async ($, on) => {
+  const clock = engine(on)
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId: string }).turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' } as never)
+  await $.tool.call({ tool: PLAN_TOOL, steps } as never)
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  // まとめ中は、件数は 5/5 のまま、百分率を 99% にし、終端の手前に矢印を残し、スピナーを回し続ける
+  await clock.advance(1_000)
+  await expectBand($, ['Tasks 5/5', '99%', '：Finishing up', '▶'], ['100%', '✓', '：All steps done'])
+  // まとめ中は経過時間を数え続け、20 秒を過ぎても消さない
+  await clock.advance(30_000)
+  await expectBand($, ['99%', '0:00:31'])
+  // ターンが回答で終わると 100% と ✓ になり、経過時間はそこで止まる
+  await $.turn.complete(mainEnd('answer'))
+  await expectBand($, ['100%', '✓', '：All steps done'], ['99%', '▶'])
+  await clock.advance(5_000)
+  await expectBand($, ['0:00:31'])
+  // ターンの終わりから 20 秒で消える
+  await clock.advance(15_000)
+  await expectNothingDrawn($)
+})
+
+test('T35 まとめ中のターンが中断で終わっても完了にし、サブエージェントのターンでは待たない', async ($, on) => {
+  engine(on)
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId: string }).turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 中断で終わったまとめ中の計画は、止めずに完了にする
+  await $.turn.start({ text: 'go', turnId: 't1' } as never)
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await expectBand($, ['99%'])
+  await $.turn.complete(mainEnd('aborted'))
+  await expectBand($, ['100%', '✓'], ['99%'])
+  // サブエージェントのターンが動いていても、メインのターンが動いていなければ、すべて完了した時点で完了にする
+  await $.turn.start({ text: 'p', turnId: 't2', agentId: 'a1' } as never)
+  await $.tool.call({ tool: PLAN_TOOL, title: 'Next', steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await expectBand($, ['100%', '✓'], ['99%'])
+})
+
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
