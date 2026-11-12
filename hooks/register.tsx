@@ -36,6 +36,11 @@ const BAR_COLOR = '#6b8fc6'
 // 文字と背景のコントラストを自動で上げるターミナルでは、暗い色を指定しても明るい灰色に引き上げられる（herdr 上で確認）。
 // そのため色を暗くする代わりに、残りの区間は粗い点「·」で描いて目立たせない（利用者の判断）
 const REST_COLOR = '#3a3a3a'
+// 残りの区間のうち、件数の区切りにあたるセルに描く記号で、「·」より大きい点で区切りを示す（利用者の指定）
+const REST_MARK = '•'
+// 区切りの記号の色で、残りの区間と同じ色では見分けにくかったため、完了区間と同じ色にする（利用者の指定）。
+// ターミナルのコントラスト補正が暗い色を引き上げ、残りの「·」と同じ明るさにするので、明るさでなく色相で区別する
+const MARK_COLOR = BAR_COLOR
 
 // システムプロンプトに足す節（モデルだけが読む）
 const PLAN_PROMPT =
@@ -128,6 +133,24 @@ function shownRatio(plan: Plan, now: number) {
  * 止めるまでに数えた spent に、数えている区間（startedAt から now）を足す。止めている間（startedAt が無い）は spent のまま。
  */
 const elapsedMs = (plan: Plan, now: number) => (plan.spent ?? 0) + (plan.startedAt === undefined ? 0 : Math.max(0, now - plan.startedAt))
+
+/**
+ * 幅 barW のバーのうち、セル start から終端までの残りの区間を、色ごとに描き分ける連続した文字列の並びに分ける
+ * n 件の区切り（k 件目の終わり、k = 1〜n-1）にあたるセルを REST_MARK（mark が true）、それ以外を「·」の連なりにする。
+ * 区切りのセルは完了区間の長さと同じ切り捨ての式で求めるので、k 件が完了した時点で先端の矢印が来るセルと一致し、矢印に隠れる。
+ */
+function restRuns(barW: number, start: number, n: number) {
+  const marks = new Set<number>()
+  for (let k = 1; k < n; k++) marks.add(Math.floor((barW * k) / n + 1e-9))
+  const runs: { text: string; mark: boolean }[] = []
+  for (let i = Math.max(0, start); i < barW; i++) {
+    const mark = marks.has(i)
+    const last = runs[runs.length - 1]
+    if (last && !mark && !last.mark) last.text += '·'
+    else runs.push({ text: mark ? REST_MARK : '·', mark })
+  }
+  return runs
+}
 
 /** ミリ秒を「時:分:秒」（例：0:01:05）にする */
 function clockText(ms: number) {
@@ -593,7 +616,11 @@ export const register: Register = on => {
             <Text>
               <Text color={BAR_COLOR}>{'━'.repeat(fillC)}</Text>
               {tip ? <Text color={BAR_COLOR}>{tip}</Text> : null}
-              <Text color={REST_COLOR}>{'·'.repeat(Math.max(0, barW - fillC - tip.length))}</Text>
+              {restRuns(barW, fillC + tip.length, n).map((run, i) => (
+                <Text key={`rest-${i}`} color={run.mark ? MARK_COLOR : REST_COLOR}>
+                  {run.text}
+                </Text>
+              ))}
             </Text>
             <Text bold color={BAR_COLOR}>
               {label}

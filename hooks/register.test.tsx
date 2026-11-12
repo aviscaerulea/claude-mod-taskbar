@@ -553,6 +553,25 @@ test('T29 エラーで終わった TaskStop では、作業単位を完了にし
   await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
 })
 
+test('T30 残りの区間は、件数の区切りのセルを完了区間と同じ色の大きい点で描く', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 5 件すべて未着手なら、幅 59 セルのバーの 11, 23, 35, 47 セル目が区切り（0 セル目は先端の矢印）
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'pending' })) } as never)
+  type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
+  const ui = await $.ui.mount(BAND)
+  // バーの行は 1 つの Text にまとまり、その子が色ごとの連なりになる（find の text は部分一致で、バーの行全体が見つかる）
+  const bar = (await ui.find({ type: 'Text', text: '•' })) as Drawn | undefined
+  await ui.unmount()
+  const dots = (k: number) => '·'.repeat(k)
+  expect(bar?.text).toBe(`▶${dots(10)}•${dots(11)}•${dots(11)}•${dots(11)}•${dots(11)}`)
+  const runs = (bar?.children ?? []).filter((c): c is Drawn => typeof c === 'object')
+  const marks = runs.filter(c => c.children?.[0] === '•')
+  expect(marks.length).toBe(4)
+  expect(marks.every(c => c.props?.color === '#6b8fc6')).toBe(true)
+  expect(runs.filter(c => c.children?.[0] === dots(11)).every(c => c.props?.color === '#3a3a3a')).toBe(true)
+})
+
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
