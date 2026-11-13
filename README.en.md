@@ -8,12 +8,12 @@ Even with a model that has no TodoWrite, you can see at a glance what is being w
 
 ```
 認証機能の実装：テストを書く
-⠹ ━━━━━━━━━━━━━━━━━━━━━━━━━━▶··········•············•············ Tasks 2/5 40% 0:03:12
+⠹ ━━━━━━━━━━━━━━━━━━━━━━━━━━▶··········•············•············ Tasks   2/5  41% 0:03:12
 ```
 
 ## Features
 
-- Progress bar: When Claude updates its step list, shows the share of finished steps as a bar with the count and percentage.
+- Progress bar: When Claude updates its step list, shows the progress as a bar, the finished steps as a count, and how full the bar is as a percentage.
 - Smooth motion: Extends the running step's part of the bar little by little over time, up to three quarters of that step's share, and moves on to the next position in about a second when the step is done.
 - Moving shine: While work is running, sweeps a light from left to right across the whole filled part of the bar, a little faster on a longer bar, and drops it when the work is interrupted.
 - Spinner: Spins at the left end of the bar until Claude finishes its work, stops when the work is interrupted, and turns into `✓` when Claude is done.

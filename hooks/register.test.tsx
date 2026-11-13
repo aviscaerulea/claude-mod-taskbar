@@ -71,7 +71,7 @@ test('T1 計画の行に比率、件数、実行中の手順が出る', async ($
   expect(textOf(r)).toBe('Plan saved: 2 of 5 steps done.')
 
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'Tasks 2/5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Tasks   2/5' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '40%' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '：three' })).toBeDefined()
   await ui.unmount()
@@ -233,7 +233,7 @@ test('T14 プロンプト送信で、全完了の計画は消え、作業途中�
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
   await $.prompt.submit(submitOf('more'))
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'Tasks 2/5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Tasks   2/5' })).toBeDefined()
   await ui.unmount()
 
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
@@ -252,12 +252,12 @@ test('T15 メインのターンが回答で終わると、未完了の計画を�
   await $.turn.complete({ ...end, reason: 'answer', agentId: 'id-A' } as never)
   await $.turn.complete({ ...end, reason: 'aborted', isAborted: true } as never)
   let ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'Tasks 2/5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Tasks   2/5' })).toBeDefined()
   await ui.unmount()
 
   await $.turn.complete({ ...end, reason: 'answer' } as never)
   ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'Tasks 5/5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Tasks   5/5' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'All steps done' })).toBeDefined()
   await ui.unmount()
 })
@@ -275,26 +275,26 @@ test('T16 バーは実行中の区間を時間で伸ばし、完了で次の位�
     await ui.unmount()
   }
 
-  // 幅 57 セルのバーで、1 件目の区間（20%）の 75% を上限に、その半分まで 30 秒で伸びる（4.275 セルを切り捨てて 4）
+  // 幅 53 セルのバーで、1 件目の区間（20%）の 75% を上限に、その半分まで 30 秒で伸びる（3.975 セルを切り捨てて 3）
   await clock.advance(30_000)
-  await expectFill(4)
+  await expectFill(3)
   // 同じ状態の送り直しでは位置を変えない
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  await expectFill(4)
+  await expectFill(3)
 
-  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 56 セル）
+  // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む
   const second = steps.map((st, i) => ({ ...st, status: i === 0 ? 'completed' : i === 1 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: second } as never)
-  await expectFill(4)
+  await expectFill(3)
   await clock.advance(500)
   await expectFill(7)
 
-  // 1 件だけの計画を長く実行しても、時間経過では区間の 75%（57 セル中 42 セル）までしか伸ばさず、先端の矢印を残す
+  // 1 件だけの計画を長く実行しても、時間経過では区間の 75%（53 セル中 39 セル）までしか伸ばさず、先端の矢印を残す
   await $.tool.call({ tool: PLAN_TOOL, steps: [{ text: 'only', status: 'in_progress' }] } as never)
   await clock.advance(600_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(42) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(43) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(39) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(40) })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: '▶' })).toBeDefined()
   await ui.unmount()
 })
@@ -315,13 +315,13 @@ test('T17 ターンが中断で終わると、バーをその位置で止め、�
   await clock.advance(30_000)
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
   await clock.advance(60_000)
-  await expectFill(4)
+  await expectFill(3)
 
   // 同じ状態の計画が届くと、止めた位置から伸び直す（巻き戻さない）
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  await expectFill(4)
+  await expectFill(3)
   await clock.advance(60_000)
-  await expectFill(7)
+  await expectFill(6)
 })
 
 test('T18 止めたバーより手前から始まる計画が届くと、バーをその位置へ戻して伸ばす', async ($, on) => {
@@ -333,12 +333,13 @@ test('T18 止めたバーより手前から始まる計画が届くと、バー�
   await clock.advance(30_000)
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
 
-  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 57 セル）
+  // 1 件目から始め直した計画は、1 秒で 1 件目の区間へ戻り、そこから伸びる（幅 53 セル）
   const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
   await clock.advance(30_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(4) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(3) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(4) })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -407,13 +408,13 @@ test('T20 サブエージェントは 1 件として数え、終わるまで回�
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
   await spawn($)
-  await expectBand($, ['Tasks 2/6'])
+  await expectBand($, ['Tasks   2/6'])
 
   await $.turn.complete({ answer: 'done', durationMs: 1, turnId: 't1', isAborted: false, reason: 'answer' } as never)
-  await expectBand($, ['Tasks 5/6', ' · 1 running in background'], ['100%', 'All steps done'])
+  await expectBand($, ['Tasks   5/6', ' · 1 running in background'], ['100%', 'All steps done'])
 
   await $.turn.complete(agentEnd('a1'))
-  await expectBand($, ['Tasks 6/6', '100%', 'All steps done'], [' · 1 running in background'])
+  await expectBand($, ['Tasks   6/6', '100%', 'All steps done'], [' · 1 running in background'])
 })
 
 test('T21 バックグラウンドのシェルコマンドは終了通知で完了し、全完了の 20 秒後に消える', async ($, on) => {
@@ -421,15 +422,15 @@ test('T21 バックグラウンドのシェルコマンドは終了通知で完�
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
   await $.tool.call({ tool: 'Bash', command: 'bg' })
-  await expectBand($, ['Tasks 5/6', ' · 1 running in background'])
+  await expectBand($, ['Tasks   5/6', ' · 1 running in background'])
 
   await notify($, 'b1', 'running')
-  await expectBand($, ['Tasks 5/6'])
+  await expectBand($, ['Tasks   5/6'])
   await notify($, 'b1', 'completed')
-  await expectBand($, ['Tasks 6/6', '100%'])
+  await expectBand($, ['Tasks   6/6', '100%'])
   // 同じ通知の行が描き直されても変わらない
   await notify($, 'b1', 'completed')
-  await expectBand($, ['Tasks 6/6'])
+  await expectBand($, ['Tasks   6/6'])
 
   await clock.advance(20_000)
   await expectNothingDrawn($)
@@ -440,9 +441,9 @@ test('T21b TaskStop で止めた作業は通知なしで完了にする', async 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
   await $.tool.call({ tool: 'Bash', command: 'bg' })
-  await expectBand($, ['Tasks 2/6'])
+  await expectBand($, ['Tasks   2/6'])
   await $.tool.call({ tool: 'TaskStop', task_id: 'b1' } as never)
-  await expectBand($, ['Tasks 3/6'], [' · 1 running in background'])
+  await expectBand($, ['Tasks   3/6'], [' · 1 running in background'])
 })
 
 test('T22 入れ子、teammate、Workflow 内部の agent と、サブエージェントの Bash は数えない', async ($, on) => {
@@ -453,7 +454,7 @@ test('T22 入れ子、teammate、Workflow 内部の agent と、サブエージ�
   await spawn($, { isTeammate: true, name: 'n2' })
   await spawn($, { workflow: { runId: 'wf_1', agentIndex: 1 }, name: 'n3' })
   await $.tool.call({ tool: 'Bash', command: 'bg', agentId: 'id-A' })
-  await expectBand($, ['Tasks 2/5'])
+  await expectBand($, ['Tasks   2/5'])
 })
 
 test('T23 プロンプト送信で、完了済みの作業単位を捨て、未完了のものは残す', async ($, on) => {
@@ -464,19 +465,19 @@ test('T23 プロンプト送信で、完了済みの作業単位を捨て、未�
   await spawn($, { name: 'a1' })
   await spawn($, { name: 'a2' })
   await $.turn.complete(agentEnd('a1'))
-  await expectBand($, ['Tasks 3/7'])
+  await expectBand($, ['Tasks   3/7'])
   await $.prompt.submit(submitOf('more'))
-  await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
+  await expectBand($, ['Tasks   2/6', ' · 1 running in background'])
 })
 
 test('T24 計画がなくても、作業単位だけで Background のバーを出す', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await spawn($)
-  await expectBand($, ['Background', 'Tasks 0/1', ' · 1 running in background'])
+  await expectBand($, ['Background', 'Tasks   0/1', ' · 1 running in background'])
   // 後から届いた題名なしの計画は Background を引き継がない
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
-  await expectBand($, ['Plan', 'Tasks 2/6'])
+  await expectBand($, ['Plan', 'Tasks   2/6'])
 })
 
 test('T25 TaskStop で止めたサブエージェントも完了にする', async ($, on) => {
@@ -485,7 +486,7 @@ test('T25 TaskStop で止めたサブエージェントも完了にする', asyn
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
   await spawn($)
   await $.tool.call({ tool: 'TaskStop', task_id: 'a1' } as never)
-  await expectBand($, ['Tasks 3/6'])
+  await expectBand($, ['Tasks   3/6'])
 })
 
 test('T26 中断で止めた計画は、作業単位の出入りでは止めたまま件数だけ変え、全完了で 100% にする', async ($, on) => {
@@ -505,7 +506,7 @@ test('T26 中断で止めた計画は、作業単位の出入りでは止めた�
   await $.tool.call({ tool: 'Bash', command: 'bg' })
   await $.turn.complete(agentEnd('a1'))
   await clock.advance(60_000)
-  await expectBand($, ['Tasks 3/7', '0:00:30'])
+  await expectBand($, ['Tasks   3/7', '0:00:30'])
   const after = await $.ui.mount(BAND)
   expect(await after.find({ type: 'Text', text: /^━+$/ })).toEqual(bar)
   await after.unmount()
@@ -514,7 +515,7 @@ test('T26 中断で止めた計画は、作業単位の出入りでは止めた�
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
   await notify($, 'b1', 'completed')
   await clock.advance(1_000)
-  await expectBand($, ['Tasks 7/7', '100%'])
+  await expectBand($, ['Tasks   7/7', '100%'])
 })
 
 test('T27 起動の記録より先に終わったサブエージェントは、エージェント一覧と突き合わせて完了にする', async ($, on) => {
@@ -525,11 +526,11 @@ test('T27 起動の記録より先に終わったサブエージェントは、�
   await $.turn.complete(agentEnd('a9'))
   agentRows = [{ id: 'a9', status: 'completed', description: 'scan', type: 'Explore' }]
   await spawn($, { name: 'a9' })
-  await expectBand($, ['Tasks 3/6'], [' · 1 running in background'])
+  await expectBand($, ['Tasks   3/6'], [' · 1 running in background'])
   // 一覧で実行中のものは未完了のまま加える
   agentRows = [{ id: 'a8', status: 'running', description: 'scan', type: 'Explore' }]
   await spawn($, { name: 'a8' })
-  await expectBand($, ['Tasks 3/7', ' · 1 running in background'])
+  await expectBand($, ['Tasks   3/7', ' · 1 running in background'])
 })
 
 test('T28 再開したサブエージェントは、前の実行の終了通知の行が描き直されても完了にしない', async ($, on) => {
@@ -541,10 +542,10 @@ test('T28 再開したサブエージェントは、前の実行の終了通知�
   await $.turn.complete(agentEnd('a1'))
   await spawn($, { resume: { agentId: 'a1' } })
   await notify($, 'a1', 'completed')
-  await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
+  await expectBand($, ['Tasks   2/6', ' · 1 running in background'])
   // 再開した実行の終了は turn.complete で拾う
   await $.turn.complete(agentEnd('a1'))
-  await expectBand($, ['Tasks 3/6'], [' · 1 running in background'])
+  await expectBand($, ['Tasks   3/6'], [' · 1 running in background'])
 })
 
 test('T29 エラーで終わった TaskStop では、作業単位を完了にしない', async ($, on) => {
@@ -553,13 +554,13 @@ test('T29 エラーで終わった TaskStop では、作業単位を完了にし
   await $.tool.call({ tool: PLAN_TOOL, steps } as never)
   await $.tool.call({ tool: 'Bash', command: 'bg' })
   await $.tool.call({ tool: 'TaskStop', task_id: 'b1', command: 'fail' } as never)
-  await expectBand($, ['Tasks 2/6', ' · 1 running in background'])
+  await expectBand($, ['Tasks   2/6', ' · 1 running in background'])
 })
 
 test('T30 残りの区間は、件数の区切りのセルを琥珀色の太字の大きい点で描く', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  // 5 件すべて未着手なら、幅 57 セルのバーの 11, 22, 34, 45 セル目が区切り（0 セル目は先端の矢印）
+  // 5 件すべて未着手なら、幅 53 セルのバーの 10, 21, 31, 42 セル目が区切り（0 セル目は先端の矢印）
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'pending' })) } as never)
   type Drawn = { props?: { color?: string }; text?: string; children?: (Drawn | string)[] }
   const ui = await $.ui.mount(BAND)
@@ -567,12 +568,12 @@ test('T30 残りの区間は、件数の区切りのセルを琥珀色の太字�
   const bar = (await ui.find({ type: 'Text', text: '•' })) as Drawn | undefined
   await ui.unmount()
   const dots = (k: number) => '·'.repeat(k)
-  expect(bar?.text).toBe(`▶${dots(10)}•${dots(10)}•${dots(11)}•${dots(10)}•${dots(11)}`)
+  expect(bar?.text).toBe(`▶${dots(9)}•${dots(10)}•${dots(9)}•${dots(10)}•${dots(10)}`)
   const runs = (bar?.children ?? []).filter((c): c is Drawn => typeof c === 'object')
   const marks = runs.filter(c => c.children?.[0] === '•')
   expect(marks.length).toBe(4)
   expect(marks.every(c => c.props?.color === '#e5a54b' && c.props?.bold === true)).toBe(true)
-  expect(runs.filter(c => c.children?.[0] === dots(11)).every(c => c.props?.color === '#3a3a3a')).toBe(true)
+  expect(runs.filter(c => c.children?.[0] === dots(10)).every(c => c.props?.color === '#3a3a3a')).toBe(true)
 })
 
 test('T31 左端のスピナーは未完了の間だけ回り、中断で止まり、全完了で ✓ になる', async ($, on) => {
@@ -650,9 +651,9 @@ test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが�
         expect(restarted || forward).toBe(true)
         if (restarted) sweeps++
       }
-      // 2 往復目からは、バーが完了数の位置（セル 22）より長いので、完了済みの区間を光が通ることを確かめられる
-      // 出直した直後に光る左端（セル 0〜2）は数えず、完了済みの区間の途中（セル 3〜21）を光が通ったときだけ数える
-      if (sweeps > 0 && at >= 3 && at < 22) reachedDone = true
+      // 2 往復目からは、バーが完了数の位置（セル 21）より長いので、完了済みの区間を光が通ることを確かめられる
+      // 出直した直後に光る左端（セル 0〜2）は数えず、完了済みの区間の途中（セル 3〜20）を光が通ったときだけ数える
+      if (sweeps > 0 && at >= 3 && at < 21) reachedDone = true
       last = at
       gap = 0
     }
@@ -688,7 +689,7 @@ test('T32 実行中は進んだ部分の全体に光の帯を流し、バーが�
 test('T33 光の帯は、バーが長いほど速く流れる', async ($, on) => {
   const clock = engine(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  // 5 件中 4 件が完了した計画で、バーは 57 セル中の約 46 セルまで進む
+  // 5 件中 4 件が完了した計画で、バーは 53 セル中の約 43 セルまで進む
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map((st, i) => ({ ...st, status: i < 4 ? 'completed' : 'in_progress' })) } as never)
   await clock.advance(2_000)
   // 帯が左端から出直したコマを 3 回まで記録し、2 回目から 3 回目までを 1 往復のコマ数とする
@@ -725,7 +726,7 @@ test('T34 すべて完了しても、メインのターンが終わるまでは 
   await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
   // まとめ中は、件数は 5/5 のまま、百分率を 99% にし、終端の手前に矢印を残し、スピナーを回し続ける
   await clock.advance(1_000)
-  await expectBand($, ['Tasks 5/5', '99%', '：Finishing up', '▶'], ['100%', '✓', '：All steps done'])
+  await expectBand($, ['Tasks   5/5', '99%', '：Finishing up', '▶'], ['100%', '✓', '：All steps done'])
   // まとめ中は経過時間を数え続け、20 秒を過ぎても消さない
   await clock.advance(30_000)
   await expectBand($, ['99%', '0:00:31'])
@@ -761,15 +762,61 @@ test('T36 伸びている途中で件数が増え、位置が新しい上限を�
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  // 5 件中 1 件目の上限（全体の 15%、幅 57 セルで 8.55 セル）の近くまで伸ばす
+  // 5 件中 1 件目の上限（全体の 15%、幅 53 セルで 7.95 セル）の近くまで伸ばす
   await clock.advance(600_000)
-  // 6 件に増えると上限は全体の 12.5%（7.125 セル）に下がるが、すでに超えた位置（8 セル）で留める
+  // 6 件に増えると上限は全体の 12.5%（6.625 セル）に下がるが、すでに超えた位置（7 セル）で留める
   await $.tool.call({ tool: PLAN_TOOL, steps: [...first, { text: 'extra', status: 'pending' }] } as never)
   await clock.advance(600_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(8) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(9) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(7) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(8) })).toBeUndefined()
   await ui.unmount()
+})
+
+test('T37 百分率は時間で伸びるバーと揃えて増やし、件数と百分率の桁が変わってもバーの幅を変えない', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  /** バーの行（矢印を含む Text）のセル数 */
+  const barWidth = async () => {
+    const ui = await $.ui.mount(BAND)
+    const bar = (await ui.find({ type: 'Text', text: /▶/ })) as { text?: string } | undefined
+    await ui.unmount()
+    return [...(bar?.text ?? '')].length
+  }
+  const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  await expectBand($, ['Tasks   0/5', '  0%'])
+  expect(await barWidth()).toBe(53)
+  // 30 秒で 1 件目の区間（20%）の 75% の半分、全体の 7.5% まで伸び、百分率も四捨五入で 8% になる
+  await clock.advance(30_000)
+  await expectBand($, ['  8%'], ['  0%'])
+  expect(await barWidth()).toBe(53)
+  // 12 件中 10 件の完了で件数と百分率が 2 桁になっても、バーの幅は変わらない
+  const many = Array.from({ length: 12 }, (_, i) => ({ text: `s${i}`, status: i < 10 ? 'completed' : i === 10 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: many } as never)
+  await clock.advance(1_000)
+  await expectBand($, ['Tasks 10/12', ' 83%'])
+  expect(await barWidth()).toBe(53)
+})
+
+test('T38 百分率は、計画が完了するまで 99% で止め、完了したらすぐ 100% にする', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 全完了の計画は、バーが満タンまで伸びるのを待たずに 100% を出す
+  await $.tool.call({ tool: PLAN_TOOL, steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
+  await expectBand($, ['100%', '✓'])
+  await clock.advance(1_000)
+  // 全完了のバーが残る間に新しい計画が届くと、バーは満タンから 1 秒かけて戻るが、百分率は 100% を出さない
+  const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  await expectBand($, [' 99%'], ['100%'])
+  await clock.advance(1_000)
+  await expectBand($, ['  0%'], ['100%'])
+  // 60 件中 59 件の完了で最後の 1 件が時間で伸び、四捨五入で 100% に届く位置まで来ても 99% で止める
+  const many = Array.from({ length: 60 }, (_, i) => ({ text: `s${i}`, status: i < 59 ? 'completed' : 'in_progress' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: many } as never)
+  await clock.advance(600_000)
+  await expectBand($, ['Tasks 59/60', ' 99%'], ['100%'])
 })
 
 test('T9 計画がなければエンジンに任せる', async ($, on) => {
@@ -784,7 +831,7 @@ test('T10 reload 前に保存した計画を描く', async ($, on) => {
   const kept = { title: 'Kept', steps: [{ text: 'a', status: 'completed' }, { text: 'b', status: 'in_progress' }], shown: true }
   on('state.get', () => ({ value: { value: kept, version: 1 } }))
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'Tasks 1/2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Tasks   1/2' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '：b' })).toBeDefined()
   await ui.unmount()
 })

@@ -683,23 +683,31 @@ export const register: Register = on => {
     //   まとめ中は、バーを終端の 1 セル手前で止め、百分率を 99% にする（利用者の指定）
     //   完了区間と矢印には、実行中の間だけ光の帯を流す（fillRuns）
     // 題名の行を上、バーを下に置く（利用者の指定）
-    // 件数と百分率は、完了した手順と作業単位だけで数える。バーだけが時間で伸びる推定の位置を描く（利用者の判断）
+    // 件数は、完了した手順と作業単位だけで数える
+    // 百分率は、バーと揃えるため、時間で伸びる推定の位置を含めたバーの割合から求める（利用者の指定）
+    //   完了数の割合を下限とし、完了の報告が届いたら、バーが CATCH_MS かけて追い付くのを待たずに百分率を進める
+    //   四捨五入にし、2/3 件の完了を前と同じ 67% と出す
+    //   計画が完了するまでは 99% で止め、完了したらすぐ 100% にする（まとめ中も 99%。利用者の指定）
+    //   四捨五入で 99.5% 以上になる 50 件以上の計画や、全完了したバーから新しい計画へ 1 秒かけて戻る間に、未完了の 100% を出さないため
     const { n, done } = units(plan)
     const bg = runningJobs(plan)
     const finishing = isFinishing(plan)
-    const pct = `${finishing ? 99 : Math.round((done / n) * 100)}%`
-    const label = `Tasks ${done}/${n}`
+    const now = await $.clock.now()
+    const ratio = shownRatio(plan, now)
+    // 件数と百分率の桁が増えるたびにバーが縮むのを防ぐため、件数は「10/10」、百分率は「100%」の幅を確保し、足りない分は左を空白で埋めて右に寄せる（利用者の指定）
+    // 100 件以上の計画では件数が確保した幅を超え、そのときだけバーが縮む
+    const pct = `${isFinished(plan) ? 100 : Math.min(99, Math.round(Math.max(done / n, ratio) * 100))}%`.padStart(4)
+    const label = `Tasks ${`${done}/${n}`.padStart(5)}`
     const current = plan.steps.find(st => st.status === 'in_progress')
     const nextUp = plan.steps.find(st => st.status === 'pending')
     const line = current ? current.text : finishing ? 'Finishing up' : done === n ? 'All steps done' : nextUp ? `Next: ${nextUp.text}` : ''
     const title = plan.title || 'Background'
     // 右端には計画の開始からの経過時間を出す（完了と中断で止まる。利用者の指定）
-    const now = await $.clock.now()
     const time = clockText(elapsedMs(plan, now))
     // バーはスピナー 1 セル、件数、百分率、経過時間と、その間の空白 4 つを除いた残りの幅いっぱいに描く
     const barW = Math.max(6, w - label.length - pct.length - time.length - 5)
     // 切り捨てで数え、実行中の区間が四捨五入で終端まで埋まって完了に見えるのを防ぐ（小数の誤差で 1 セル欠けないよう微小な値を足す）
-    const fillC = Math.min(finishing ? barW - 1 : barW, Math.max(0, Math.floor(barW * shownRatio(plan, now) + 1e-9)))
+    const fillC = Math.min(finishing ? barW - 1 : barW, Math.max(0, Math.floor(barW * ratio + 1e-9)))
     // 100% に届くまでは、完了区間の先に、棒より大きい矢印の先端を 1 セル描く（利用者の指定）
     const tip = fillC < barW ? '▶' : ''
 
