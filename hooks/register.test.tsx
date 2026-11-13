@@ -271,29 +271,30 @@ test('T16 バーは実行中の区間を時間で伸ばし、完了で次の位�
   const expectFill = async (cells: number) => {
     const ui = await $.ui.mount(BAND)
     expect(await ui.find({ type: 'Text', text: '━'.repeat(cells) })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '━'.repeat(cells + 1) })).toBeUndefined()
     await ui.unmount()
   }
 
-  // 幅 57 セルのバーで、1 件目の区間（20%）の半分まで 30 秒で伸びる（5.7 セルを切り捨てて 5）
+  // 幅 57 セルのバーで、1 件目の区間（20%）の 75% を上限に、その半分まで 30 秒で伸びる（4.275 セルを切り捨てて 4）
   await clock.advance(30_000)
-  await expectFill(5)
+  await expectFill(4)
   // 同じ状態の送り直しでは位置を変えない
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  await expectFill(5)
+  await expectFill(4)
 
   // 1 件目が完了すると、その時点の位置から動き出し、0.5 秒で次の位置との中間まで進む（幅は 56 セル）
   const second = steps.map((st, i) => ({ ...st, status: i === 0 ? 'completed' : i === 1 ? 'in_progress' : 'pending' }))
   await $.tool.call({ tool: PLAN_TOOL, steps: second } as never)
-  await expectFill(5)
+  await expectFill(4)
   await clock.advance(500)
-  await expectFill(8)
+  await expectFill(7)
 
-  // 1 件だけの計画を長く実行しても、区間の終端（全幅 57 セル）までは埋めず、先端の矢印を残す
+  // 1 件だけの計画を長く実行しても、時間経過では区間の 75%（57 セル中 42 セル）までしか伸ばさず、先端の矢印を残す
   await $.tool.call({ tool: PLAN_TOOL, steps: [{ text: 'only', status: 'in_progress' }] } as never)
   await clock.advance(600_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(56) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(57) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(42) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(43) })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: '▶' })).toBeDefined()
   await ui.unmount()
 })
@@ -308,18 +309,19 @@ test('T17 ターンが中断で終わると、バーをその位置で止め、�
   const expectFill = async (cells: number) => {
     const ui = await $.ui.mount(BAND)
     expect(await ui.find({ type: 'Text', text: '━'.repeat(cells) })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '━'.repeat(cells + 1) })).toBeUndefined()
     await ui.unmount()
   }
   await clock.advance(30_000)
   await $.turn.complete({ answer: '', durationMs: 1, turnId: 't1', isAborted: true, reason: 'aborted' } as never)
   await clock.advance(60_000)
-  await expectFill(5)
+  await expectFill(4)
 
   // 同じ状態の計画が届くと、止めた位置から伸び直す（巻き戻さない）
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
-  await expectFill(5)
+  await expectFill(4)
   await clock.advance(60_000)
-  await expectFill(9)
+  await expectFill(7)
 })
 
 test('T18 止めたバーより手前から始まる計画が届くと、バーをその位置へ戻して伸ばす', async ($, on) => {
@@ -336,7 +338,7 @@ test('T18 止めたバーより手前から始まる計画が届くと、バー�
   await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
   await clock.advance(30_000)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '━'.repeat(5) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(4) })).toBeDefined()
   await ui.unmount()
 })
 
@@ -752,6 +754,22 @@ test('T35 まとめ中のターンが中断で終わっても完了にし、サ�
   await $.turn.start({ text: 'p', turnId: 't2', agentId: 'a1' } as never)
   await $.tool.call({ tool: PLAN_TOOL, title: 'Next', steps: steps.map(st => ({ ...st, status: 'completed' })) } as never)
   await expectBand($, ['100%', '✓'], ['99%'])
+})
+
+test('T36 伸びている途中で件数が増え、位置が新しい上限を超えても、バーを巻き戻さない', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const first = steps.map((st, i) => ({ ...st, status: i === 0 ? 'in_progress' : 'pending' }))
+  await $.tool.call({ tool: PLAN_TOOL, steps: first } as never)
+  // 5 件中 1 件目の上限（全体の 15%、幅 57 セルで 8.55 セル）の近くまで伸ばす
+  await clock.advance(600_000)
+  // 6 件に増えると上限は全体の 12.5%（7.125 セル）に下がるが、すでに超えた位置（8 セル）で留める
+  await $.tool.call({ tool: PLAN_TOOL, steps: [...first, { text: 'extra', status: 'pending' }] } as never)
+  await clock.advance(600_000)
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(8) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '━'.repeat(9) })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('T9 計画がなければエンジンに任せる', async ($, on) => {

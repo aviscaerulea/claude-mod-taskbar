@@ -16,8 +16,11 @@ const NUDGE_AFTER = 1
 // 完了数が変わらないまま、正常に終わったツールを何回呼んだら更新を促すか（利用者の指定）
 // 手順の完了の報告漏れに気付くきっかけを作るのが目的で、厳密な検出は狙わない（利用者の判断）
 const STALE_AFTER = 5
-// 実行中の手順の区間を、何ミリ秒ごとに残りの半分ずつ伸ばすか（減速しながら区間の終端へ近づき、終端には届かない）
+// 実行中の手順の区間を、何ミリ秒ごとに上限までの残りの半分ずつ伸ばすか（減速しながら上限へ近づき、上限には届かない）
 const CREEP_HALF_MS = 30_000
+// 時間経過で伸ばす上限を、実行中の 1 件の区間に対する割合で示す（利用者の指定）
+// 時間経過だけでバー上の 1 件分が完了したように見せないため、区間の終端より手前で止める
+const CREEP_CAP = 0.75
 // 完了数か実行中の手順が変わったとき、前の位置から新しい位置まで何ミリ秒で動かすか
 const CATCH_MS = 1_000
 // バーを描き直す間隔（ミリ秒）。エンジンは描き直しを 1 秒 10 回までにまとめるので、それより粗くする
@@ -137,7 +140,8 @@ function progressKey(plan: Plan) {
 /**
  * 時刻 now にバーが描く割合（0〜1）を求める
  * 件数と完了数は手順と作業単位を合わせて数える（units）。
- * 実行中の手順か未完了の作業単位があれば、次の 1 件の区間を起点から CREEP_HALF_MS ごとに残りの半分ずつ伸ばし、完了の報告が届くまで区間の終端には届かせない。
+ * 実行中の手順か未完了の作業単位があれば、区間に CREEP_CAP を掛けた位置を上限とし、次の 1 件の区間を起点から CREEP_HALF_MS ごとに上限までの残りの半分ずつ伸ばし、完了の報告が届くまで上限には届かせない。
+ * 起点が区間の中で上限を超えているとき（伸びている途中で件数が増えたとき）は、起点で留めて巻き戻さない。
  * 伸ばす起点は、完了数の位置と起点の割合 from の大きい方とし、止めた位置から再開してもバーを巻き戻さない。
  * from が区間の終端を超えるとき（完了数の少ない計画に置き換わったとき）は、完了数の位置から伸ばし、バーはそこへ戻る。
  * 起点 at から CATCH_MS の間は、from からその位置へ動かす。paused の計画は from の位置で止めたまま描く。
@@ -153,7 +157,8 @@ function shownRatio(plan: Plan, now: number) {
   const running = plan.steps.some(st => st.status === 'in_progress') || runningJobs(plan) > 0
   const end = running ? base + 1 / n : base
   const lo = from < end ? Math.max(base, from) : base
-  const target = running ? lo + (end - lo) * (1 - 0.5 ** (dt / CREEP_HALF_MS)) : base
+  const top = Math.max(lo, base + CREEP_CAP / n)
+  const target = running ? lo + (top - lo) * (1 - 0.5 ** (dt / CREEP_HALF_MS)) : base
   const p = Math.min(1, dt / CATCH_MS)
   return from + (target - from) * p
 }
